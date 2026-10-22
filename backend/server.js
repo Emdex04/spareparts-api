@@ -40,6 +40,11 @@ function localNow() {
     return new Date(Date.now() + TZ_OFFSET_HOURS * 3600e3).toISOString().replace("T", " ").slice(0, 19);
 }
 function localToday() { return localNow().slice(0, 10); }
+// ₦13,000 — used in activity-log notes
+const money = n => "₦" + Number(n || 0).toLocaleString("en-NG", { maximumFractionDigits: 2 });
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const niceDate = d => { const [y, m, dd] = d.split("-").map(Number); return `${dd} ${MON[m - 1]} ${y}`; };   // 22 Oct 2026
+const receiptNo = r => "No. " + parseInt(r.split("-").pop(), 10);                                       // R-20261022-0007 -> No. 7
 function isDate(s) { return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s); }
 function shiftDate(d, days) {
     const t = new Date(d + "T00:00:00Z");
@@ -166,10 +171,14 @@ const SCHEMA = `
         closed_by      TEXT NOT NULL,
         closed_at      TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT
+    );
     CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sale_date);
     CREATE INDEX IF NOT EXISTS idx_items_sale ON sale_items(sale_id);
 `;
-const DATA_TABLES = ["parts", "users", "audit_log", "sessions", "sales", "sale_items", "day_close"];
+const DATA_TABLES = ["parts", "users", "audit_log", "sessions", "sales", "sale_items", "day_close", "settings"];
 
 async function migrate() {
     await client.executeMultiple(SCHEMA);
@@ -421,7 +430,7 @@ async function startServer() {
         // New staff choose their own password on first sign-in
         const r = await run("INSERT INTO users (username, password, role, must_change_password) VALUES (?, ?, ?, 1)",
             [username, hashPassword(password), role]);
-        await writeAudit({ user: req.user, action: "ADD_USER", note: `Added ${role}: ${username}` });
+        await writeAudit({ user: req.user, action: "ADD_USER", note: `Added ${username} as ${role === "admin" ? "owner" : "staff"}` });
         res.status(201).json({ id: r.lastInsertRowid, username, role });
     }));
 
@@ -436,7 +445,7 @@ async function startServer() {
             { sql: "DELETE FROM sessions WHERE user_id = ?", args: [id] },
             { sql: "DELETE FROM users WHERE id = ?", args: [id] }
         ], "write");
-        await writeAudit({ user: req.user, action: "DELETE_USER", note: `Removed: ${user.username}` });
+        await writeAudit({ user: req.user, action: "DELETE_USER", note: `Removed ${user.username}` });
         res.json({ message: "Removed" });
     }));
 
@@ -468,7 +477,7 @@ async function startServer() {
         const r = await run("INSERT INTO parts (name, sku, barcode, qty, min, price, cost) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [name, sku, bc.value, qty, min, price, cost]);
         const part = await get("SELECT * FROM parts WHERE id = ?", [r.lastInsertRowid]);
-        await writeAudit({ user: req.user, action: "ADD_PART", part, qtyBefore: 0, qtyAfter: qty, note: `Added at ₦${price}` });
+        await writeAudit({ user: req.user, action: "ADD_PART", part, qtyBefore: 0, qtyAfter: qty, note: `Selling price ${money(price)}` });
         res.status(201).json(part);
     }));
 
@@ -501,8 +510,10 @@ async function startServer() {
 
         await run("UPDATE parts SET name=?, sku=?, min=?, price=?, cost=?, barcode=? WHERE id=?",
             [upd.name, upd.sku, upd.min, upd.price, upd.cost, upd.barcode, id]);
-        const changes = Object.keys(upd).filter(k => upd[k] !== part[k])
-            .map(k => `${k}: ${part[k]} → ${upd[k]}`).join(", ");
+        const NAMES = { name: "Name", sku: "SKU", min: "Warn-at level", price: "Price", cost: "Cost", barcode: "Barcode" };
+        const show = (k, v) => (k === "price" || k === "cost") ? money(v) : (v == null || v === "" ? "none" : v);
+        const changes = Object.keys(upd).filter(k => (upd[k] ?? null) !== (part[k] ?? null))
+            .map(k => `${NAMES[k]}: ${show(k, part[k])} → ${show(k, upd[k])}`).join("; ");
         await writeAudit({ user: req.user, action: "EDIT_PART", part, note: changes || "No changes" });
         res.json(await get("SELECT * FROM parts WHERE id = ?", [id]));
     }));
@@ -517,7 +528,7 @@ async function startServer() {
 
         await run("UPDATE parts SET qty = qty + ? WHERE id = ?", [add, id]);
         await writeAudit({ user: req.user, action: "RESTOCK", part, qtyBefore: part.qty, qtyAfter: part.qty + add,
-                           note: `Restocked +${add} unit(s)` });
+                           note: `Added ${add} to stock` });
         res.json(await partFor(req.user, id));
     }));
 
@@ -605,7 +616,7 @@ async function startServer() {
                     [saleId, part.id, part.name, part.sku, qty, part.price, part.cost || 0, qty * part.price], tx);
                 await run("UPDATE parts SET qty = qty - ? WHERE id = ?", [qty, part.id], tx);
                 await writeAudit({ user: req.user, action: "SALE", part, qtyBefore: part.qty, qtyAfter: part.qty - qty,
-                                   note: `${receipt}: sold ${qty} @ ₦${part.price}` }, tx);
+                                   note: `Sold ${qty} × ${money(part.price)} · receipt ${receiptNo(receipt)}` }, tx);
             }
             await tx.commit();
             res.status(201).json(await saleWithItems(saleId, req.user.role === "admin"));
@@ -699,8 +710,34 @@ async function startServer() {
                        transfer_total=excluded.transfer_total, note=excluded.note, closed_by=excluded.closed_by, closed_at=excluded.closed_at`,
             [date, cash, pos, transfer, note, req.user.username, localNow()]);
         await writeAudit({ user: req.user, action: "DAY_CLOSE",
-                           note: `${before ? "Updated" : "Closed"} ${date}: cash ₦${cash}, POS ₦${pos}, transfer ₦${transfer}` });
+                           note: `${before ? "Updated" : "Saved"} for ${niceDate(date)}: cash ${money(cash)}, POS ${money(pos)}, transfer ${money(transfer)}` });
         res.json(await get("SELECT * FROM day_close WHERE close_date = ?", [date]));
+    }));
+
+    /* =========================
+       SHOP DETAILS (shown on receipts)
+    ========================= */
+    const SHOP_KEYS = { name: 60, address: 120, phone: 40, receipt_note: 120 };
+    async function readShop() {
+        const out = { name: "", address: "", phone: "", receipt_note: "" };
+        for (const r of await query("SELECT key, value FROM settings WHERE key LIKE 'shop_%'"))
+            out[r.key.slice(5)] = r.value || "";
+        return out;
+    }
+    // Before sign-in: only the name, for the sign-in screen
+    app.get("/api/settings/public", h(async (req, res) => res.json({ name: (await readShop()).name })));
+    app.get("/api/settings", requireAuth, h(async (req, res) => res.json(await readShop())));
+    app.put("/api/settings", requireAdmin, h(async (req, res) => {
+        const stmts = [];
+        for (const [k, max] of Object.entries(SHOP_KEYS)) {
+            if (req.body?.[k] === undefined) continue;
+            const v = String(req.body[k]).trim().slice(0, max);
+            stmts.push({ sql: "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: ["shop_" + k, v] });
+        }
+        if (stmts.length) await client.batch(stmts, "write");
+        const shop = await readShop();
+        await writeAudit({ user: req.user, action: "SHOP_DETAILS", note: `Shop name: ${shop.name || "—"}` });
+        res.json(shop);
     }));
 
     /* =========================

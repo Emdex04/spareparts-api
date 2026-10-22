@@ -77,3 +77,17 @@ Backup of the previous version: _backup_2026-10-22
 - Backup download and restore work the same with Turso or a local file; restore no longer needs a restart
   and accepts backups from older versions of the app.
 - `render.yaml` switched to the free plan; `DEPLOY.md` rewritten with the Turso and keep-awake steps.
+
+---
+
+# New look and shop details — 22 Oct 2026 (fifth update)
+- Redesigned screens: clearer layout, light and dark mode (follows the phone's setting; switch any time).
+- Phones: bottom bar with a big Sell button and a More menu; tables turn into easy-to-read cards.
+- Dates and times read naturally ("Today, 2:25 pm", "Thursday, 22 October 2026"); money shows as ₦13,000,
+  with large totals shortened on summary cards (₦1.27m) — the full figure shows on hover.
+- Long codes are hidden: receipts show "No. 7", parts show a small "Barcode" tag, labels say "Shop barcode".
+- Dashboard: greeting, clickable summary cards, today's sales and a "Reorder soon" list.
+- Settings → Shop details: business name, address, phone and receipt message. They appear on receipts,
+  WhatsApp receipts, the sign-in screen and the top of the app.
+- Activity log uses plain words ("Stock added", "Day check") and money with commas.
+- All styling moved out of index.html into style.css.

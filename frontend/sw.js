@@ -1,9 +1,10 @@
-const CACHE_NAME = "spareparts-v5";
+const CACHE_NAME = "spareparts-v6";
 
 // Files to cache for offline use
 const STATIC_ASSETS = [
     "/index.html",
     "/app.js",
+    "/style.css",
     "/manifest.json"
 ];
 
