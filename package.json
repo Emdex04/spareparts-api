@@ -1,16 +1,10 @@
 {
-  "name": "spareparts-backend",
-  "version": "1.0.0",
-  "main": "server.js",
+  "name": "spareparts-pro",
+  "private": true,
+  "description": "SpareParts Pro — inventory, sales and receipts for spare parts dealers",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "postinstall": "cd backend && npm install --omit=dev",
+    "start": "node backend/server.js"
   },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.18.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.0"
-  }
+  "engines": { "node": ">=18" }
 }

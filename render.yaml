@@ -1,0 +1,22 @@
+# Render setup for SpareParts Pro: one paid web service with a 1 GB permanent disk.
+# The disk keeps the database safe through restarts and updates; Render also snapshots it daily.
+services:
+  - type: web
+    name: spareparts-api
+    runtime: node
+    region: frankfurt            # closest Render region to Nigeria
+    plan: 0.5c-512mb             # smallest paid instance — never sleeps, can use a disk
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_PATH
+        value: /var/data/spareparts.db
+      - key: TZ_OFFSET_HOURS
+        value: "1"
+      - key: NODE_VERSION
+        value: "22"
+    disk:
+      name: spareparts-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,0 +1,6 @@
+node_modules/
+*.db
+*.db.tmp
+backups/
+_backup_*/
+.env
