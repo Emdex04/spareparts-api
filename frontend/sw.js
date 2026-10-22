@@ -1,4 +1,4 @@
-const CACHE_NAME = "spareparts-v4";
+const CACHE_NAME = "spareparts-v5";
 
 // Files to cache for offline use
 const STATIC_ASSETS = [

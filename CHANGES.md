@@ -66,3 +66,14 @@ Backup of the previous version: _backup_2026-10-22
 - Admins see a red warning on the Dashboard if the server isn't saving data permanently.
 - Manage Users → Backups: download a full backup, or restore from one (current data is kept as a safety copy first).
 - `render.yaml` and `DEPLOY.md` for setting up Render with a permanent disk.
+
+---
+
+# Free hosting with Turso — 22 Oct 2026 (fourth update)
+- Data can now live in Turso (free online database). Set `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` on Render.
+  Without them, data is kept in `backend/spareparts.db` (on this computer).
+- Every sale is saved in one transaction: either the whole sale is recorded, or nothing is deducted.
+- Server errors are caught and answered cleanly instead of crashing the server.
+- Backup download and restore work the same with Turso or a local file; restore no longer needs a restart
+  and accepts backups from older versions of the app.
+- `render.yaml` switched to the free plan; `DEPLOY.md` rewritten with the Turso and keep-awake steps.

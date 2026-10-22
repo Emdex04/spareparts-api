@@ -1294,9 +1294,11 @@ async function checkStorage() {
         const warn = $("storageWarn");
         if (warn) warn.style.display = st.permanent ? "none" : "flex";
         const info = $("backupInfo");
-        if (info) info.textContent = st.permanent
-            ? (st.latest_backup ? `Automatic daily copies: ${st.backups_kept} kept on the server (latest: ${st.latest_backup.replace("spareparts-", "").replace(".db", "")}).` : "Automatic daily copies start today.")
-            : "Warning: the server is not saving data permanently yet. Download a backup now.";
+        if (info) info.textContent = !st.permanent
+            ? "Warning: the server is not saving data permanently yet. Download a backup now."
+            : st.storage === "turso"
+                ? "Your data is stored online in Turso, so it is kept safe when the server restarts."
+                : (st.latest_backup ? `Automatic daily copies: ${st.backups_kept} kept on the server (latest: ${st.latest_backup.replace("spareparts-", "").replace(".db", "")}).` : "Automatic daily copies start today.");
     } catch (_) {}
 }
 
@@ -1321,7 +1323,7 @@ async function restoreBackup(input) {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
-    if (!confirm(`Replace ALL current data with "${file.name}"?\n\nToday's data is kept as a safety copy on the server, but the app will show only what is in this file.`)) return;
+    if (!confirm(`Replace ALL current data with "${file.name}"?\n\nDownload a backup of today's data first if you might need it. After this, the app will show only what is in this file.`)) return;
     try {
         const res = await fetch(`${BASE}/admin/restore`, {
             method: "POST",
