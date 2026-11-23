@@ -1,8 +1,8 @@
 # SpareParts Pro — Software Requirements Specification
 
-**Version:** 1.5 (update to SRS v1.2)
-**Date:** 23 November 2026
-**Owner:** Perpetua Ijeoma Muokwe
+**Version:** 1.5 (update to SRS v1.2)  
+**Date:** 23 November 2026  
+**Owner:** Perpetua Ijeoma Muokwe  
 **Status:** Draft. Release 7 is planned to start after the SRS v1.2 updates are live and the tester period has ended.
 
 > **How to read this version.** SRS v1.2 (part of the SpareParts Pro document pack, with the Brainstorming Register and Business Proposal v2) remains the base document. This file records:
@@ -22,8 +22,8 @@
 |---|---|---|
 | 1.2 | Nov 2026 | Base document (document pack): Releases 1–6. |
 | 1.3 | 23 Nov 2026 | Releases 1–3 went live; Windows/Android apps added. Build status of Releases 1–3 recorded. Corrections to "missing features" list. Release 7 (Genuine Parts Trail) added, with its requirements, use cases, data model, risks and acceptance tests. Release order updated. |
-| 1.5 | 23 Nov 2026 | Decision: digital receipts Phase A, option 1 (one-tap WhatsApp from the shop's own account, free). Customer profiles built (FR-76 to FR-83); FR-69, FR-70 and FR-75 built, FR-73 built for customer details on offline sales. |
 | 1.4 | 23 Nov 2026 | Offline restocking and stock counting built (Release 3 now built except offline receiving sessions). Installed Windows and Android apps (FR-61 to FR-66). Display rules: upright font, short big amounts (FR-67, FR-68). Digital receipts by email, WhatsApp and SMS: feasibility and proposed requirements (FR-69 to FR-75). |
+| 1.5 | 23 Nov 2026 | Decision: digital receipts Phase A, option 1 (one-tap WhatsApp from the shop's own account, free). Customer profiles built (FR-76 to FR-83); FR-69, FR-70 and FR-75 built, FR-73 built for customer details on offline sales. |
 
 ---
 
