@@ -396,6 +396,7 @@ function openMoreSheet() {
             <div class="avatar">${esc(state.user.username.charAt(0).toUpperCase())}</div>
             <div><strong>${esc(state.user.username)}</strong><span class="role-chip ${isAdmin() ? "admin" : ""}">${isAdmin() ? "Owner" : "Staff"}</span></div>
         </div>
+        ${item("fa-address-book", "Customers", "showSection('customers')")}
         ${item("fa-clipboard-check", "Stock count", "showSection('counts')")}
         ${isAdmin() ? item("fa-barcode", "Barcode labels", "showSection('labels')") : ""}
         ${isAdmin() ? item("fa-clock-rotate-left", "Activity log", "showSection('audit')") : ""}
@@ -414,6 +415,7 @@ function showSection(id) {
     if (id === "sales")     loadSalesHistory();
     if (id === "reports")   loadReport();
     if (id === "counts")    loadCounts();
+    if (id === "customers") loadCustomers();
     if (id === "labels")    renderLabelPicker();
     if (id === "audit")     loadAuditLog();
     if (id === "users")     { loadUsers(); checkStorage(); fillShopForm(); }
@@ -425,7 +427,7 @@ function showSection(id) {
    LOADING DATA
 ------------------------------------------------------------------ */
 async function initApp() {
-    await Promise.all([fetchParts(), fetchShop()]);
+    await Promise.all([fetchParts(), fetchShop(), fetchCustomers()]);
     renderPending();
     syncPending();
     if (isAdmin()) {
@@ -817,15 +819,18 @@ async function completeSale() {
     const btn = $("completeSaleBtn");
     btn.disabled = true; btn.classList.add("loading");
     // One reference per sale: if the same sale is sent twice, the server saves it once
+    const cust = saleCustomerFields();
+    if (cust.error) { btn.disabled = false; btn.classList.remove("loading"); return toast(cust.error, "error"); }
     const body = {
-        items: state.cart.map(c => ({ ...c })), customer: $("saleCustomer").value.trim(),
+        items: state.cart.map(c => ({ ...c })), ...cust,
         payment_method: state.payMethod, client_ref: newRef()
     };
-    const clearSale = () => { state.cart = []; $("saleCustomer").value = ""; setPayMethod(null); renderCart(); };
+    const clearSale = () => { state.cart = []; clearSaleCustomer(); setPayMethod(null); renderCart(); };
     try {
         const sale = await apiFetch("/sales", { method: "POST", body: JSON.stringify(body) });
         clearSale();
         toast(`Sale saved — ${naira(sale.total)}`, "success");
+        if (body.new_customer) fetchCustomers();
         await fetchParts();
         loadSalesHistory();
         showReceipt(sale);
@@ -954,8 +959,8 @@ async function syncPending() {
             try {
                 if (k === "sale")
                     await apiFetch("/sales", { method: "POST", body: JSON.stringify({
-                        items: op.items, customer: op.customer, payment_method: op.payment_method,
-                        client_ref: op.client_ref, recorded_at: op.recorded_at }) });
+                        items: op.items, customer: op.customer, customer_id: op.customer_id, new_customer: op.new_customer,
+                        payment_method: op.payment_method, client_ref: op.client_ref, recorded_at: op.recorded_at }) });
                 else if (k === "restock")
                     await apiFetch(`/parts/${op.part_id}/restock`, { method: "POST", body: JSON.stringify({
                         qty: op.qty, client_ref: op.client_ref, recorded_at: op.recorded_at }) });
@@ -1055,6 +1060,7 @@ function showReceipt(sale) {
         ${isLive(sale) ? "" : `<div class="rc-void"><strong>${sale.void_type === "return" ? "RETURNED" : "CANCELLED"}</strong>
             by ${esc(sale.voided_by)} · ${fmtWhen(sale.voided_at)}<br>${esc(sale.void_reason)}</div>`}`;
     $("voidSaleBtn").hidden = !(isAdmin() && isLive(sale));
+    updateReceiptButtons(sale);
     openModal("receiptModal");
 }
 
@@ -1089,26 +1095,285 @@ function printReceipt() {
     setTimeout(() => document.body.classList.remove("printing-receipt"), 500);
 }
 
-function shareReceipt() {
-    const r = state.lastReceipt, s = state.shop;
-    if (!r) return;
-    const text = [
-        isLive(r) ? null : `*${r.void_type === "return" ? "RETURNED" : "CANCELLED"}*`,
-        `*${shopName()}*`,
-        s.address || null,
-        s.phone || null,
-        "",
+
+/* ------------------------------------------------------------------
+   CUSTOMERS — profiles with phone / email, so receipts and a customer's
+   purchase history can be sent to them in one tap (WhatsApp or email).
+------------------------------------------------------------------ */
+state.customers = [];
+state.saleCustomer = null;      // { id, name, phone, email } existing · { isNew: true, name } new · null walk-in
+
+const custCacheKey = () => pendingKey().replace("sp_pending_", "sp_customers_");
+
+// Same rules as the server: Nigerian numbers in any usual form → +2348031234567
+function normalizePhone(v) {
+    const raw = String(v || "").trim();
+    if (!raw) return "";
+    if (!/^[\d\s+().-]+$/.test(raw)) return null;            // letters or other symbols: not a phone number
+    const d = raw.replace(/[^\d+]/g, "");
+    if (/^\+234[1-9]\d{9}$/.test(d)) return d;
+    if (/^234[1-9]\d{9}$/.test(d)) return "+" + d;
+    if (/^0[1-9]\d{9}$/.test(d)) return "+234" + d.slice(1);
+    if (/^[789]\d{9}$/.test(d)) return "+234" + d;
+    if (/^\+[1-9]\d{7,14}$/.test(d)) return d;
+    return null;     // doesn't look like a phone number
+}
+const validEmail = e => !e || /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
+function showPhone(p) {                 // +2348031234567 → 0803 123 4567
+    if (!p) return "";
+    const m = /^\+234(\d{3})(\d{3})(\d{4})$/.exec(p);
+    return m ? `0${m[1]} ${m[2]} ${m[3]}` : p;
+}
+
+async function fetchCustomers() {
+    try {
+        state.customers = await apiFetch("/customers");
+        store(custCacheKey(), JSON.stringify(state.customers));
+    } catch (err) {
+        if (!state.customers.length) try { state.customers = JSON.parse(load(custCacheKey()) || "[]"); } catch (_) {}
+    }
+    return state.customers;
+}
+
+function matchCustomers(q) {
+    q = q.trim().toLowerCase();
+    if (!q) return state.customers.slice(0, 6);
+    const digits = q.replace(/\D/g, "").replace(/^0/, "");
+    return state.customers.filter(c => c.name.toLowerCase().includes(q) || (c.email || "").includes(q) ||
+        (digits.length >= 3 && (c.phone || "").includes(digits))).slice(0, 8);
+}
+
+/* Customer box on the Sell screen ---------------------------------- */
+function onCustomerSearch() {
+    const q = $("saleCustomer").value;
+    const box = $("custResults");
+    const found = matchCustomers(q);
+    const typed = q.trim();
+    const exact = found.some(c => c.name.toLowerCase() === typed.toLowerCase());
+    box.innerHTML = found.map(c => `
+        <button type="button" class="cust-opt" onmousedown="event.preventDefault()" onclick="pickCustomer(${c.id})">
+            <strong>${esc(c.name)}</strong><span>${esc(showPhone(c.phone) || c.email || "no phone or email")}${c.visits ? ` · ${count(c.visits, "visit")}` : ""}</span>
+        </button>`).join("") +
+        (typed && !exact ? `<button type="button" class="cust-opt new" onmousedown="event.preventDefault()" onclick="pickNewCustomer()">
+            <strong><i class="fa-solid fa-user-plus"></i> New customer: ${esc(typed)}</strong><span>add phone / email to send the receipt</span></button>` : "");
+    box.hidden = !box.innerHTML.trim();
+}
+function onCustomerKey(e) {
+    if (e.key === "Escape") $("custResults").hidden = true;
+    if (e.key === "Enter") { e.preventDefault(); const first = $("custResults").querySelector(".cust-opt"); if (first) first.click(); }
+}
+document.addEventListener("click", e => {
+    if (!e.target.closest?.("#custSearchWrap")) { const b = $("custResults"); if (b) b.hidden = true; }
+});
+
+function pickCustomer(id) {
+    const c = state.customers.find(x => x.id === id);
+    if (!c) return;
+    state.saleCustomer = { id: c.id, name: c.name, phone: c.phone, email: c.email };
+    renderSaleCustomer();
+}
+function pickNewCustomer() {
+    const name = $("saleCustomer").value.trim();
+    if (!name) return;
+    state.saleCustomer = { isNew: true, name };
+    renderSaleCustomer();
+    $("newCustPhone").focus();
+}
+function clearSaleCustomer() {
+    state.saleCustomer = null;
+    $("saleCustomer").value = ""; $("newCustPhone").value = ""; $("newCustEmail").value = ""; $("newCustConsent").checked = true;
+    renderSaleCustomer();
+}
+function renderSaleCustomer() {
+    const c = state.saleCustomer;
+    $("custResults").hidden = true;
+    $("custSearchWrap").hidden = !!c;
+    $("custNewFields").hidden = !(c && c.isNew);
+    $("custPicked").hidden = !c;
+    if (c) $("custPicked").innerHTML = `
+        <div class="avatar sm">${esc(c.name.charAt(0).toUpperCase())}</div>
+        <div class="cust-picked-main"><strong>${esc(c.name)}</strong>
+            <span>${c.isNew ? "New customer" : esc(showPhone(c.phone) || c.email || "No phone or email saved")}</span></div>
+        <button class="btn btn-ghost btn-sm" onclick="clearSaleCustomer()" title="Remove"><i class="fa-solid fa-xmark"></i></button>`;
+}
+
+// What the sale sends about the customer. Returns { error } if a typed phone/email is wrong.
+function saleCustomerFields() {
+    const c = state.saleCustomer;
+    if (!c) return { customer: $("saleCustomer").value.trim() };     // just a name typed, or walk-in
+    if (!c.isNew) return { customer: c.name, customer_id: c.id };
+    const phone = normalizePhone($("newCustPhone").value);
+    const email = $("newCustEmail").value.trim().toLowerCase();
+    if (phone === null) return { error: "That phone number doesn't look right (e.g. 0803 123 4567)" };
+    if (!validEmail(email)) return { error: "That email address doesn't look right" };
+    if (!phone && !email) return { customer: c.name };              // name only: no profile needed
+    return { customer: c.name, new_customer: { name: c.name, phone, email, consent: $("newCustConsent").checked } };
+}
+
+/* Sending receipts ---------------------------------------------------- */
+// WhatsApp and email open in the phone's / computer's own apps, from the shop's own account: free.
+function openLink(url) {
+    if (url.startsWith("mailto:") || IN_APP) location.href = url;
+    else window.open(url, "_blank");
+}
+function receiptText(r, plain = false) {
+    const s = state.shop, b = t => plain ? t : `*${t}*`;
+    return [
+        isLive(r) ? null : b(r.void_type === "return" ? "RETURNED" : "CANCELLED"),
+        b(shopName()), s.address || null, s.phone || null, "",
         `Receipt ${receiptShort(r.receipt_no)} · ${fmtDate(r.created_at, { year: true })}, ${fmtTime(r.created_at)}`,
-        r.customer ? `Customer: ${r.customer}` : null,
-        "",
-        ...r.items.map(i => `${i.part_name} × ${i.qty} — ${naira(i.line_total)}`),
-        "",
-        `*Total: ${naira(r.total)}* (${PAY_LABELS[r.payment_method] || "Cash"})`,
+        r.customer ? `Customer: ${r.customer}` : null, "",
+        ...r.items.map(i => `${i.part_name} × ${i.qty} — ${naira(i.line_total)}`), "",
+        `${b("Total: " + naira(r.total))} (${PAY_LABELS[r.payment_method] || "Cash"})`,
         s.receipt_note || "Thank you for your patronage",
         `Ref: ${r.receipt_no}`
     ].filter(l => l !== null).join("\n");
-    if (navigator.share) navigator.share({ title: `Receipt ${receiptShort(r.receipt_no)}`, text }).catch(() => {});
-    else window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+}
+function logSent(customerId, channel, what) {
+    if (customerId) apiFetch(`/customers/${customerId}/sent`, { method: "POST", body: JSON.stringify({ channel, what }) }).catch(() => {});
+}
+
+function shareReceipt() {
+    const r = state.lastReceipt;
+    if (!r) return;
+    const text = receiptText(r), phone = r.customer_info?.phone;
+    if (phone) {
+        openLink(`https://wa.me/${phone.replace(/\D/g, "")}?text=${encodeURIComponent(text)}`);
+        logSent(r.customer_info.id, "whatsapp", `Receipt ${receiptShort(r.receipt_no)}`);
+    } else if (navigator.share) navigator.share({ title: `Receipt ${receiptShort(r.receipt_no)}`, text }).catch(() => {});
+    else openLink(`https://wa.me/?text=${encodeURIComponent(text)}`);
+}
+function emailReceipt() {
+    const r = state.lastReceipt, email = r?.customer_info?.email;
+    if (!email) return;
+    const subject = `Receipt ${receiptShort(r.receipt_no)} from ${shopName()}`;
+    openLink(`mailto:${email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(receiptText(r, true))}`);
+    logSent(r.customer_info.id, "email", `Receipt ${receiptShort(r.receipt_no)}`);
+}
+function updateReceiptButtons(r) {
+    const ci = r.customer_info;
+    $("shareReceiptBtn").querySelector("span").textContent = ci?.phone ? `WhatsApp ${ci.name.split(" ")[0]}` : "Share";
+    $("emailReceiptBtn").hidden = !ci?.email;
+}
+
+/* Customers screen ---------------------------------------------------- */
+async function loadCustomers() {
+    $("customerTableBody").innerHTML = `<tr><td class="empty-cell" colspan="5">Loading…</td></tr>`;
+    await fetchCustomers();
+    renderCustomers();
+}
+function renderCustomers() {
+    const q = ($("customerSearch")?.value || "").trim().toLowerCase();
+    const digits = q.replace(/\D/g, "").replace(/^0/, "");
+    const list = !q ? state.customers : state.customers.filter(c => c.name.toLowerCase().includes(q) ||
+        (c.email || "").includes(q) || (digits.length >= 3 && (c.phone || "").includes(digits)));
+    $("customerTableBody").innerHTML = list.length ? list.map(c => `
+        <tr class="clickable" onclick="openCustomer(${c.id})">
+            <td class="card-title"><strong>${esc(c.name)}</strong>${c.email ? `<div class="muted small">${esc(c.email)}</div>` : ""}</td>
+            <td data-label="Phone">${esc(showPhone(c.phone)) || `<span class="muted">—</span>`}</td>
+            <td class="num" data-label="Visits">${c.visits || 0}</td>
+            <td class="num" data-label="Spent">${money(c.spent || 0)}</td>
+            <td data-label="Last visit">${c.last_visit ? fmtWhen(c.last_visit) : `<span class="muted">—</span>`}</td>
+        </tr>`).join("")
+        : `<tr><td class="empty-cell" colspan="5">${q ? "No customer matches." : "No customers yet. Add one here, or when you make a sale."}</td></tr>`;
+}
+
+async function openCustomer(id) {
+    try {
+        const c = await apiFetch(`/customers/${id}`);
+        state.openCustomer = c;
+        const done = c.sales.filter(isLive);
+        $("customerModalBody").innerHTML = `
+            <h3><i class="fa-solid fa-user"></i> ${esc(c.name)}</h3>
+            <p class="modal-sub">${[c.phone && `<i class="fa-brands fa-whatsapp"></i> ${esc(showPhone(c.phone))}`, c.email && `<i class="fa-solid fa-envelope"></i> ${esc(c.email)}`]
+                .filter(Boolean).join(" &nbsp;·&nbsp; ") || "No phone or email saved"}${c.consent ? "" : (c.phone || c.email ? ` <span class="pill low small-pill">no consent to messages</span>` : "")}</p>
+            ${c.note ? `<p class="small" style="margin-bottom:10px;">${esc(c.note)}</p>` : ""}
+            <div class="mini-stats" style="margin-bottom:14px;">
+                <span><strong>${c.visits}</strong> ${c.visits === 1 ? "visit" : "visits"}</span>
+                <span><strong>${money(c.spent)}</strong> spent</span>
+                <span>${c.last_visit ? `last: <strong>${fmtWhen(c.last_visit)}</strong>` : "no purchases yet"}</span>
+            </div>
+            <div class="table-wrap" style="max-height:340px;overflow:auto;margin-bottom:14px;"><table class="table">
+                <thead><tr><th>Receipt</th><th>Items</th><th class="num">Total</th></tr></thead>
+                <tbody>${c.sales.length ? c.sales.map(s => `
+                    <tr class="clickable ${isLive(s) ? "" : "voided"}" onclick="closeModal('customerModal');viewReceipt(${s.id})">
+                        <td class="card-title"><strong>${receiptShort(s.receipt_no)}</strong> ${voidChip(s)}<div class="muted small">${fmtWhen(s.created_at)} · ${esc(PAY_LABELS[s.payment_method] || "Cash")}</div></td>
+                        <td data-label="Items" class="small">${esc(s.items.map(i => `${i.part_name} × ${i.qty}`).join(", "))}</td>
+                        <td class="num" data-label="Total"><strong>${money(s.total)}</strong></td>
+                    </tr>`).join("") : `<tr><td class="empty-cell" colspan="3">No purchases yet.</td></tr>`}</tbody>
+            </table></div>
+            <div class="modal-actions">
+                ${isAdmin() ? `<button class="btn btn-ghost" onclick="deleteCustomer(${c.id})" title="Remove contact details; sales are kept">Forget</button>` : ""}
+                <button class="btn btn-secondary" onclick="openCustomerEdit(state.openCustomer)"><i class="fa-solid fa-pen"></i> Edit</button>
+                ${c.email && done.length ? `<button class="btn btn-secondary" onclick="sendStatement('email')"><i class="fa-solid fa-envelope"></i> Email history</button>` : ""}
+                ${c.phone && done.length ? `<button class="btn btn-primary" onclick="sendStatement('whatsapp')"><i class="fa-brands fa-whatsapp"></i> WhatsApp history</button>` : ""}
+                <button class="btn btn-secondary" onclick="closeModal('customerModal')">Close</button>
+            </div>`;
+        openModal("customerModal");
+    } catch (err) { toast(err.offline ? "No internet — customer history needs a connection" : err.message, "error"); }
+}
+
+// The customer's chain of purchases, newest first, ready to send
+function statementText(c, plain) {
+    const b = t => plain ? t : `*${t}*`, done = c.sales.filter(isLive);
+    const lines = [], MAX = 15;
+    for (const s of done.slice(0, MAX))
+        lines.push(`${fmtDate(s.created_at, { year: true })} · ${receiptShort(s.receipt_no)} · ${naira(s.total)}\n   ${s.items.map(i => `${i.part_name} × ${i.qty}`).join(", ")}`);
+    if (done.length > MAX) lines.push(`…and ${count(done.length - MAX, "earlier purchase")}`);
+    return [
+        b(shopName()), state.shop.phone || null, "",
+        b(`Purchase history for ${c.name}`), "",
+        ...lines, "",
+        b(`Total: ${naira(c.spent)} over ${count(c.visits, "visit")}`),
+        "Thank you for buying from us."
+    ].filter(l => l !== null).join("\n");
+}
+function sendStatement(channel) {
+    const c = state.openCustomer;
+    if (!c) return;
+    if (channel === "email")
+        openLink(`mailto:${c.email}?subject=${encodeURIComponent(`Your purchases at ${shopName()}`)}&body=${encodeURIComponent(statementText(c, true))}`);
+    else openLink(`https://wa.me/${c.phone.replace(/\D/g, "")}?text=${encodeURIComponent(statementText(c))}`);
+    logSent(c.id, channel, "Purchase history");
+}
+
+let editingCustomerId = null;
+function openCustomerEdit(c = null) {
+    editingCustomerId = c ? c.id : null;
+    $("custEditTitle").textContent = c ? "Edit customer" : "Add customer";
+    $("custEditName").value = c?.name || "";
+    $("custEditPhone").value = showPhone(c?.phone) || "";
+    $("custEditEmail").value = c?.email || "";
+    $("custEditNote").value = c?.note || "";
+    $("custEditConsent").checked = c ? !!c.consent : true;
+    if (c) closeModal("customerModal");
+    openModal("customerEditModal");
+    setTimeout(() => $("custEditName").focus(), 30);
+}
+async function saveCustomerEdit() {
+    const phone = normalizePhone($("custEditPhone").value), email = $("custEditEmail").value.trim().toLowerCase();
+    if (!$("custEditName").value.trim()) return toast("Enter the customer's name", "error");
+    if (phone === null) return toast("That phone number doesn't look right (e.g. 0803 123 4567)", "error");
+    if (!validEmail(email)) return toast("That email address doesn't look right", "error");
+    const body = { name: $("custEditName").value.trim(), phone, email, note: $("custEditNote").value.trim(), consent: $("custEditConsent").checked };
+    try {
+        const c = await apiFetch(editingCustomerId ? `/customers/${editingCustomerId}` : "/customers",
+                                 { method: editingCustomerId ? "PUT" : "POST", body: JSON.stringify(body) });
+        closeModal("customerEditModal");
+        toast(editingCustomerId ? "Customer updated" : "Customer added", "success");
+        await fetchCustomers();
+        if ($("customers").classList.contains("active")) renderCustomers();
+        if (editingCustomerId) openCustomer(c.id);
+    } catch (err) { toast(err.offline ? "No internet — add the customer when you're online, or add them during a sale" : err.message, "error"); }
+}
+async function deleteCustomer(id) {
+    if (!confirm("Forget this customer's phone and email? Their past sales stay on record with their name.")) return;
+    try {
+        await apiFetch(`/customers/${id}`, { method: "DELETE" });
+        closeModal("customerModal");
+        toast("Customer's contact details removed", "success");
+        loadCustomers();
+    } catch (err) { toast(err.message, "error"); }
 }
 
 /* ------------------------------------------------------------------
@@ -1977,6 +2242,10 @@ const ACTIONS = {
     LOGIN_FAILED:    ["Wrong password",    "fa-user-lock",      "c-low"],
     LOGIN_BLOCKED:   ["Sign-in blocked",   "fa-ban",            "c-out"],
     COUNT_START:     ["Count started",     "fa-clipboard-list", "c-accent"],
+    ADD_CUSTOMER:    ["Customer added",    "fa-user-plus",      "c-accent"],
+    EDIT_CUSTOMER:   ["Customer edited",   "fa-user-pen",       "c-accent"],
+    DELETE_CUSTOMER: ["Customer removed",  "fa-user-minus",     "c-out"],
+    RECEIPT_SENT:    ["Receipt sent",      "fa-paper-plane",    "c-ok"],
     COUNT_SUBMIT:    ["Count sent",        "fa-paper-plane",    "c-accent"],
     COUNT_APPROVE:   ["Count reviewed",    "fa-clipboard-check","c-ok"],
     COUNT_REJECT:    ["Count set aside",   "fa-clipboard",      "c-low"]

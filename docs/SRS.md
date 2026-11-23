@@ -1,6 +1,6 @@
 # SpareParts Pro — Software Requirements Specification
 
-**Version:** 1.4 (update to SRS v1.2)
+**Version:** 1.5 (update to SRS v1.2)
 **Date:** 23 November 2026
 **Owner:** Perpetua Ijeoma Muokwe
 **Status:** Draft. Release 7 is planned to start after the SRS v1.2 updates are live and the tester period has ended.
@@ -9,7 +9,8 @@
 > 1. the build status of every v1.2 requirement as of 23 Nov 2026 (section 2),
 > 2. corrections to v1.2 (section 3),
 > 3. the new **Release 7: Genuine Parts Trail** (sections 4–12),
-> 4. the **installed apps** (Windows, Android) and display rules (sections 14–15), and the **digital receipts** feasibility study (section 16), added in v1.4.
+> 4. the **installed apps** (Windows, Android) and display rules (sections 14–15), and the **digital receipts** feasibility study (section 16), added in v1.4,
+> 5. **customer profiles** and one-tap WhatsApp / email receipts and purchase history (section 17), added in v1.5.
 >
 > Requirement IDs from v1.2 (FR-01 to FR-29, E-FR-03, UC-01 to UC-04, Releases 1–6) keep their numbers. New items start at FR-30 and UC-05 so nothing clashes. When v1.2's full text is merged into this file, sections 2 and 3 replace v1.2's status notes.
 
@@ -21,6 +22,7 @@
 |---|---|---|
 | 1.2 | Nov 2026 | Base document (document pack): Releases 1–6. |
 | 1.3 | 23 Nov 2026 | Releases 1–3 went live; Windows/Android apps added. Build status of Releases 1–3 recorded. Corrections to "missing features" list. Release 7 (Genuine Parts Trail) added, with its requirements, use cases, data model, risks and acceptance tests. Release order updated. |
+| 1.5 | 23 Nov 2026 | Decision: digital receipts Phase A, option 1 (one-tap WhatsApp from the shop's own account, free). Customer profiles built (FR-76 to FR-83); FR-69, FR-70 and FR-75 built, FR-73 built for customer details on offline sales. |
 | 1.4 | 23 Nov 2026 | Offline restocking and stock counting built (Release 3 now built except offline receiving sessions). Installed Windows and Android apps (FR-61 to FR-66). Display rules: upright font, short big amounts (FR-67, FR-68). Digital receipts by email, WhatsApp and SMS: feasibility and proposed requirements (FR-69 to FR-75). |
 
 ---
@@ -36,7 +38,7 @@
 | 4 | Stock receiving sessions with review screen | Not started |
 | 5 | Guided tutorials with voice, practice mode, French/Igbo | Not started |
 | 6 | Configurable product fields and units for other trades (bearings, plastics, electrical) | Not started |
-| 6b | Digital receipts (section 16): Phase A free (WhatsApp to the customer's number, email, receipt link) | **Proposed.** Feasible now at no cost. |
+| 6b | Digital receipts (section 16): Phase A free — customer profiles, one-tap WhatsApp, email through the mail app | **Built** (v1.5, section 17). Receipt link page (FR-71) still proposed. |
 | 6c | Digital receipts Phase B: fully automatic WhatsApp / SMS | **Proposed.** Paid per message; decide after testers. |
 | — | Tester period (2 shops, about 2 weeks) | Next |
 | — | Multi-shop version with Paystack paywall | Decide after testing |
@@ -59,6 +61,7 @@
 | Release 3 (rest) | Offline restocking and stock counting (a count must be started online) | Built (23 Nov, v1.4) | Stock, Stock Count; yellow "waiting" bar |
 | FR-61 to FR-66 | Installed Windows and Android apps | Built (23 Nov, v1.4) | `desktop/`, `mobile/`, APPS.md |
 | FR-67, FR-68 | Upright font; amounts from ₦1M shown short (₦2.53M) with the full amount on hover or tap | Built (23 Nov, v1.4) | Every screen except receipts |
+| FR-69, FR-70, FR-75, FR-76 to FR-83 | Customer profiles; one-tap WhatsApp / email receipts and purchase history; sends recorded | Built (23 Nov, v1.5) | Sell → Customer box; Customers screen; receipt buttons |
 | Release 4 | Receiving sessions with review | Not built | — |
 | Release 5 | Voice guidance, tutorials, practice mode, French/Igbo | Not built | — |
 | Release 6 | Product fields and units per trade | Not built | — |
@@ -349,16 +352,56 @@ New owner endpoints: issue, list, void, alerts, report.
 
 | ID | Requirement | Phase |
 |---|---|---|
-| FR-69 | A sale can record the customer's phone number and/or email (both optional), with a tick box for consent to receive the receipt. | A |
-| FR-70 | After a sale, buttons: **WhatsApp receipt** (opens WhatsApp to that number, text ready), **Email receipt**. The owner can set either to happen automatically. | A |
+| FR-69 | A sale can record the customer's phone number and/or email (both optional), with a tick box for consent to receive the receipt. | A — **built v1.5** |
+| FR-70 | After a sale, buttons: **WhatsApp receipt** (opens WhatsApp to that number, text ready), **Email receipt**. The owner can set either to happen automatically. | A — **built v1.5** as one-tap buttons; email opens the device's mail app instead of a server email service, so FR-72 is not needed for now |
 | FR-71 | Each receipt gets a public link with an unguessable reference; the page shows only what the paper receipt shows (no cost, staff or stock data). | A |
 | FR-72 | Email receipts are sent through a provider's HTTPS API (not SMTP); the API key is set as a server setting, never in the app. | A |
 | FR-73 | Sends made offline wait in the offline queue with the sale and go out when the sale reaches the server. | A |
 | FR-74 | Automatic WhatsApp (Business Platform) and SMS sending, with a monthly message budget and a count on the Reports screen. | B |
-| FR-75 | The receipt record shows whether and how it was sent (sent / failed / not sent). Customer contact details follow the Nigeria Data Protection Act 2023 (consent, no marketing without opt-in). | A and B |
+| FR-75 | **Built v1.5 (sent records in the Activity Log).** The receipt record shows whether and how it was sent (sent / failed / not sent). Customer contact details follow the Nigeria Data Protection Act 2023 (consent, no marketing without opt-in). | A and B |
 
 ### 16.3 Recommendation
 Build Phase A (free) with the tester release: phone number on the sale, one-tap WhatsApp, email through Brevo's API, and the receipt link page. Ask the testers whether customers use them, then decide on Phase B (about ₦14 per WhatsApp receipt or ₦13–20 per SMS receipt), which could be charged to shops as a paid add-on.
 
 **Same idea outside spare parts:** the same receipt engine could send school fee receipts, or short learning-support session notes, to parents by WhatsApp or email.
+
+## 17. Customer profiles and one-tap receipts (added in v1.5)
+
+**Decision (23 Nov 2026):** go with option 1 from section 16: receipts are sent from the shop's own WhatsApp (or mail app) in one tap. No per-message cost, no Meta or NCC registration. Customers get a profile so each receipt, and the whole chain of their past purchases, can be sent to the right number or email.
+
+### 17.1 Requirements
+
+| ID | Requirement | Status |
+|---|---|---|
+| FR-76 | A customer profile holds name (required), phone, email, a note, and consent to receive receipts by WhatsApp / email. Phone numbers are stored in one standard form (+2348031234567) whatever way they are typed (0803…, 234803…, +234 803…); numbers from other countries start with + and the country code. Letters in a phone number are refused. | Built |
+| FR-77 | One phone number belongs to one customer. A new customer typed with a phone that is already saved is matched to the existing profile (also for sales made offline on two devices). | Built |
+| FR-78 | On the Sell screen, the customer box searches saved customers by name, phone or email as you type (works offline from the last list received), or adds a new customer with phone and email. Leaving it empty is a walk-in sale; typing a name only keeps the name on the receipt without a profile. | Built |
+| FR-79 | Every sale with a profile is linked to the customer. Renaming a customer updates the name on their receipts. | Built |
+| FR-80 | The receipt shows **WhatsApp [name]** (opens WhatsApp to that customer's number with the receipt typed) and **Email** (opens the mail app with the receipt), when a phone or email is saved. Without a phone it falls back to the normal Share. | Built |
+| FR-81 | Customers screen (staff and owner): search; visits, total spent and last visit per customer; profile with every purchase (items, totals, cancelled ones marked); edit; add. | Built |
+| FR-82 | **Purchase history** ("statement") from the profile: the customer's purchases, newest first (up to 15, then "…and N earlier purchases"), with the total spent, sent by WhatsApp or email. | Built |
+| FR-83 | The owner can **Forget** a customer: phone and email are deleted, past sales stay on record with the name (Nigeria Data Protection Act 2023 — right to erasure). Every add, edit, removal and send is in the Activity Log. | Built |
+
+### 17.2 Rules
+- A sale made offline is never lost because of a mistyped phone number: the server saves it with the name only and no profile (FR-73).
+- Staff can see a customer's purchase history (to resend receipts) but never cost prices.
+- Sending uses the shop's own WhatsApp / email account on that device. WhatsApp must be installed (or WhatsApp Web open on the PC).
+- Messages are only for receipts and purchase history. Promotions need the customer's separate opt-in and are not part of this release.
+
+### 17.3 Acceptance tests
+| # | Test | Expected result |
+|---|---|---|
+| AT-18 | New customer during a sale: name, phone "0809 555 1234", email | Profile created with +2348095551234; receipt shows WhatsApp and Email buttons |
+| AT-19 | Tap WhatsApp on that receipt | WhatsApp opens to 2348095551234 with the receipt text; "Receipt sent" appears in the Activity Log |
+| AT-20 | Type "0809" in the customer box | The saved customer appears with phone and visit count |
+| AT-21 | Offline sale with a new customer and phone; reconnect | Sale and profile both saved on the server |
+| AT-22 | Phone "0809 555 1234abc" | Refused with "Phone number doesn't look right" |
+| AT-23 | Same phone added as a new customer on a second sale | Matched to the existing profile, no duplicate |
+| AT-24 | WhatsApp history from the profile | Message lists each purchase (date, receipt, items, amount) and the total spent |
+| AT-25 | Owner taps Forget | Phone and email gone; past sales still show the name |
+
+### 17.4 Next options
+- Receipt link page (FR-71), so a short message can carry a link instead of the full receipt; later the place to show Genuine Parts Trail checks (Release 7).
+- Fully automatic WhatsApp / SMS (FR-74, Phase B), if testers' customers want receipts without staff tapping Send.
+- Same feature outside spare parts: a school could keep parent profiles and send fee receipts or learning-support session notes the same way.
 

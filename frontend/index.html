@@ -96,6 +96,7 @@
                 <button class="nav-btn" data-section="dashboard" onclick="showSection('dashboard')"><i class="fa-solid fa-house"></i> Dashboard</button>
                 <button class="nav-btn" data-section="sales" onclick="showSection('sales')"><i class="fa-solid fa-cash-register"></i> Sell</button>
                 <button class="nav-btn" data-section="inventory" onclick="showSection('inventory')"><i class="fa-solid fa-boxes-stacked"></i> Stock <span class="badge" id="lowBadge" hidden></span></button>
+                <button class="nav-btn" data-section="customers" onclick="showSection('customers')"><i class="fa-solid fa-address-book"></i> Customers</button>
                 <button class="nav-btn" data-section="counts" onclick="showSection('counts')"><i class="fa-solid fa-clipboard-check"></i> Stock Count <span class="badge" id="countBadge" hidden></span></button>
                 <div class="nav-label admin-only">Owner</div>
                 <button class="nav-btn admin-only" data-section="reports" onclick="showSection('reports')"><i class="fa-solid fa-chart-column"></i> Reports</button>
@@ -214,8 +215,21 @@
                                 </div>
                             </div>
                             <div class="form-row">
-                                <label class="field-label" for="saleCustomer">Customer name <span class="muted">(optional)</span></label>
-                                <input class="input" id="saleCustomer" maxlength="80" placeholder="e.g. Mr Okafor">
+                                <label class="field-label" for="saleCustomer">Customer <span class="muted">(optional — to send the receipt by WhatsApp or email)</span></label>
+                                <div id="custPicked" class="cust-picked" hidden></div>
+                                <div id="custSearchWrap" class="cust-search">
+                                    <div class="input-icon"><i class="fa-solid fa-user"></i>
+                                        <input class="input" id="saleCustomer" maxlength="80" placeholder="Search name or phone, or type a new name" autocomplete="off"
+                                               oninput="onCustomerSearch()" onfocus="onCustomerSearch(); if (innerWidth < 760) this.scrollIntoView({ block: 'start', behavior: 'smooth' })" onkeydown="onCustomerKey(event)"></div>
+                                    <div id="custResults" class="cust-results" hidden></div>
+                                </div>
+                                <div id="custNewFields" class="cust-new" hidden>
+                                    <div class="grid-2">
+                                        <div><label class="field-label" for="newCustPhone">Phone (WhatsApp)</label><input class="input" id="newCustPhone" inputmode="tel" placeholder="0803 123 4567"></div>
+                                        <div><label class="field-label" for="newCustEmail">Email <span class="muted">(if any)</span></label><input class="input" id="newCustEmail" inputmode="email" autocapitalize="none" placeholder="name@gmail.com"></div>
+                                    </div>
+                                    <label class="check"><input type="checkbox" id="newCustConsent" checked> Customer agrees to get receipts by WhatsApp / email</label>
+                                </div>
                             </div>
                             <button class="btn btn-primary btn-block btn-lg" id="completeSaleBtn" onclick="completeSale()" disabled>
                                 <i class="fa-solid fa-check"></i> Complete sale
@@ -234,6 +248,28 @@
                                 </table>
                             </div>
                         </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- CUSTOMERS -->
+            <section id="customers" class="section">
+                <div class="page-header">
+                    <div><h2>Customers</h2><p>Who buys from you — send receipts and their purchase history by WhatsApp or email</p></div>
+                    <div class="header-actions">
+                        <button class="btn btn-primary" onclick="openCustomerEdit()"><i class="fa-solid fa-user-plus"></i> Add customer</button>
+                    </div>
+                </div>
+                <div class="page-body">
+                    <div class="toolbar">
+                        <div class="search"><i class="fa-solid fa-magnifying-glass"></i>
+                            <input class="input" type="search" id="customerSearch" placeholder="Search name, phone or email" oninput="renderCustomers()"></div>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="table">
+                            <thead><tr><th>Customer</th><th>Phone</th><th class="num">Visits</th><th class="num">Spent</th><th>Last visit</th></tr></thead>
+                            <tbody id="customerTableBody"></tbody>
+                        </table>
                     </div>
                 </div>
             </section>
@@ -484,7 +520,8 @@
         <div class="modal-actions">
             <button class="btn btn-danger-soft" id="voidSaleBtn" onclick="openVoidModal()" hidden><i class="fa-solid fa-rotate-left"></i> Cancel / return</button>
             <button class="btn btn-secondary" onclick="closeModal('receiptModal')">Close</button>
-            <button class="btn btn-secondary" onclick="shareReceipt()"><i class="fa-brands fa-whatsapp"></i> Share</button>
+            <button class="btn btn-secondary" id="emailReceiptBtn" onclick="emailReceipt()" hidden><i class="fa-solid fa-envelope"></i> Email</button>
+            <button class="btn btn-secondary" id="shareReceiptBtn" onclick="shareReceipt()"><i class="fa-brands fa-whatsapp"></i> <span>Share</span></button>
             <button class="btn btn-primary" onclick="printReceipt()"><i class="fa-solid fa-print"></i> Print</button>
         </div>
     </div>
@@ -507,6 +544,30 @@
         <div class="modal-actions">
             <button class="btn btn-secondary" onclick="closeModal('voidModal')">Keep the sale</button>
             <button class="btn btn-danger" onclick="confirmVoidSale()">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="customerModal">
+    <div class="modal wide">
+        <div id="customerModalBody"></div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="customerEditModal">
+    <div class="modal">
+        <h3><i class="fa-solid fa-user-pen"></i> <span id="custEditTitle">Add customer</span></h3>
+        <p class="modal-sub">Phone and email are optional, but needed to send receipts.</p>
+        <div class="form-row"><label class="field-label" for="custEditName">Name</label><input id="custEditName" maxlength="80" placeholder="e.g. Mr Okafor"></div>
+        <div class="grid-2">
+            <div class="form-row"><label class="field-label" for="custEditPhone">Phone (WhatsApp)</label><input id="custEditPhone" inputmode="tel" placeholder="0803 123 4567"></div>
+            <div class="form-row"><label class="field-label" for="custEditEmail">Email</label><input id="custEditEmail" inputmode="email" autocapitalize="none" placeholder="name@gmail.com"></div>
+        </div>
+        <div class="form-row"><label class="field-label" for="custEditNote">Note <span class="muted">(optional)</span></label><input id="custEditNote" maxlength="200" placeholder="e.g. mechanic at Ladipo, buys for Toyota"></div>
+        <label class="check"><input type="checkbox" id="custEditConsent"> Customer agrees to get receipts by WhatsApp / email</label>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="closeModal('customerEditModal')">Cancel</button>
+            <button class="btn btn-primary" onclick="saveCustomerEdit()">Save</button>
         </div>
     </div>
 </div>

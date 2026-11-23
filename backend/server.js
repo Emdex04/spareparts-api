@@ -198,6 +198,18 @@ const SCHEMA = `
         counted_at TEXT    NOT NULL,
         UNIQUE (count_id, part_id)
     );
+    CREATE TABLE IF NOT EXISTS customers (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        name       TEXT    NOT NULL,
+        phone      TEXT,                  -- stored as +2348031234567
+        email      TEXT,
+        consent    INTEGER NOT NULL DEFAULT 0,   -- agreed to receive receipts by WhatsApp / email
+        note       TEXT,
+        created_by TEXT    NOT NULL,
+        created_at TEXT    NOT NULL,
+        updated_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone) WHERE phone IS NOT NULL;
     CREATE TABLE IF NOT EXISTS op_refs (
         ref        TEXT    PRIMARY KEY,          -- the device's own reference for an action sent from the app
         kind       TEXT    NOT NULL,
@@ -209,7 +221,7 @@ const SCHEMA = `
     CREATE INDEX IF NOT EXISTS idx_count_lines ON stock_count_lines(count_id);
 `;
 const DATA_TABLES = ["parts", "users", "audit_log", "sessions", "sales", "sale_items", "day_close", "settings",
-                     "stock_counts", "stock_count_lines", "op_refs"];
+                     "stock_counts", "stock_count_lines", "op_refs", "customers"];
 
 async function migrate() {
     await client.executeMultiple(SCHEMA);
@@ -228,6 +240,9 @@ async function migrate() {
         if (!(await columnExists("sales", col)))
             await run(`ALTER TABLE sales ADD COLUMN ${col} TEXT`);
     await run("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_ref ON sales(client_ref) WHERE client_ref IS NOT NULL");
+    if (!(await columnExists("sales", "customer_id")))
+        await run("ALTER TABLE sales ADD COLUMN customer_id INTEGER");
+    await run("CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_id)");
 
     // Hash any passwords still stored as plain text. Default ones must be changed at next login.
     for (const u of await query("SELECT id, password FROM users")) {
@@ -622,12 +637,147 @@ async function startServer() {
     }));
 
     /* =========================
+       CUSTOMERS — so receipts and a customer's purchase history can be sent to their phone or email
+    ========================= */
+    // Nigerian numbers in any usual form (0803…, 803…, 234803…, +234 803…) become +2348031234567.
+    // Numbers from other countries must start with + and their country code.
+    function cleanPhone(v) {
+        const raw = String(v ?? "").trim();
+        if (!raw) return { value: null };
+        if (!/^[\d\s+().-]+$/.test(raw)) return { error: "Phone number doesn't look right (e.g. 0803 123 4567)" };
+        const d = raw.replace(/[^\d+]/g, "");
+        let out = null;
+        if (/^\+234[1-9]\d{9}$/.test(d)) out = d;
+        else if (/^234[1-9]\d{9}$/.test(d)) out = "+" + d;
+        else if (/^0[1-9]\d{9}$/.test(d)) out = "+234" + d.slice(1);
+        else if (/^[789]\d{9}$/.test(d)) out = "+234" + d;
+        else if (/^\+[1-9]\d{7,14}$/.test(d)) out = d;
+        return out ? { value: out } : { error: "Phone number doesn't look right (e.g. 0803 123 4567)" };
+    }
+    function cleanEmail(v) {
+        const e = String(v ?? "").trim().toLowerCase();
+        if (!e) return { value: null };
+        return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) && e.length <= 120 ? { value: e } : { error: "Email address doesn't look right" };
+    }
+    function readCustomerFields(b, base = {}) {
+        const name = b.name !== undefined ? String(b.name).trim().slice(0, 80) : base.name;
+        if (!name) return { error: "Enter the customer's name" };
+        const ph = b.phone !== undefined ? cleanPhone(b.phone) : { value: base.phone ?? null };
+        if (ph.error) return { error: ph.error };
+        const em = b.email !== undefined ? cleanEmail(b.email) : { value: base.email ?? null };
+        if (em.error) return { error: em.error };
+        const consent = b.consent !== undefined ? (b.consent ? 1 : 0) : (base.consent ?? 0);
+        const note = b.note !== undefined ? (String(b.note).trim().slice(0, 200) || null) : (base.note ?? null);
+        return { value: { name, phone: ph.value, email: em.value, consent, note } };
+    }
+    const CUSTOMER_STATS = `(SELECT COUNT(*) FROM sales s WHERE s.customer_id = c.id AND s.status = 'completed') AS visits,
+                            (SELECT COALESCE(SUM(total),0) FROM sales s WHERE s.customer_id = c.id AND s.status = 'completed') AS spent,
+                            (SELECT MAX(created_at) FROM sales s WHERE s.customer_id = c.id AND s.status = 'completed') AS last_visit`;
+
+    // Find a customer for a sale: an existing id, or match/create from {name, phone, email}. Used inside the sale transaction.
+    async function customerForSale(body, user, ex) {
+        const id = toInt(body?.customer_id);
+        if (id > 0) {
+            const c = await get("SELECT * FROM customers WHERE id = ?", [id], ex);
+            if (!c) return { error: "That customer no longer exists" };
+            return { value: c };
+        }
+        const nc = body?.new_customer;
+        if (!nc || typeof nc !== "object") return { value: null };
+        const f = readCustomerFields(nc);
+        if (f.error) return { error: f.error };
+        if (f.value.phone) {   // same phone = same person (e.g. added on two phones while offline)
+            const same = await get("SELECT * FROM customers WHERE phone = ?", [f.value.phone], ex);
+            if (same) {
+                if (!same.email && f.value.email) await run("UPDATE customers SET email = ?, updated_at = ? WHERE id = ?", [f.value.email, localNow(), same.id], ex);
+                return { value: { ...same, email: same.email || f.value.email } };
+            }
+        }
+        const r = await run(`INSERT INTO customers (name, phone, email, consent, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                            [f.value.name, f.value.phone, f.value.email, f.value.consent, f.value.note, user.username, localNow()], ex);
+        await writeAudit({ user, action: "ADD_CUSTOMER", note: `Added customer ${f.value.name}` }, ex);
+        return { value: await get("SELECT * FROM customers WHERE id = ?", [r.lastInsertRowid], ex) };
+    }
+
+    app.get("/api/customers", requireAuth, h(async (req, res) => {
+        const q = String(req.query.q || "").trim().toLowerCase().slice(0, 60);
+        const digits = q.replace(/\D/g, "").replace(/^0/, "");
+        const where = q ? `WHERE LOWER(c.name) LIKE ? OR LOWER(COALESCE(c.email,'')) LIKE ?${digits.length >= 3 ? " OR c.phone LIKE ?" : ""}` : "";
+        const args = q ? [`%${q}%`, `%${q}%`, ...(digits.length >= 3 ? [`%${digits}%`] : [])] : [];
+        res.json(await query(`SELECT c.*, ${CUSTOMER_STATS} FROM customers c ${where}
+                              ORDER BY (last_visit IS NULL), last_visit DESC, c.name LIMIT ${q ? 30 : 300}`, args));
+    }));
+
+    app.post("/api/customers", requireAuth, h(async (req, res) => {
+        const f = readCustomerFields(req.body || {});
+        if (f.error) return res.status(400).json({ message: f.error });
+        if (f.value.phone && await get("SELECT id FROM customers WHERE phone = ?", [f.value.phone]))
+            return res.status(400).json({ message: "A customer with this phone number is already saved" });
+        const r = await run(`INSERT INTO customers (name, phone, email, consent, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+                            [f.value.name, f.value.phone, f.value.email, f.value.consent, f.value.note, req.user.username, localNow()]);
+        await writeAudit({ user: req.user, action: "ADD_CUSTOMER", note: `Added customer ${f.value.name}` });
+        res.status(201).json(await get(`SELECT c.*, ${CUSTOMER_STATS} FROM customers c WHERE c.id = ?`, [r.lastInsertRowid]));
+    }));
+
+    app.put("/api/customers/:id", requireAuth, h(async (req, res) => {
+        const c = await get("SELECT * FROM customers WHERE id = ?", [toInt(req.params.id)]);
+        if (!c) return res.status(404).json({ message: "Customer not found" });
+        const f = readCustomerFields(req.body || {}, c);
+        if (f.error) return res.status(400).json({ message: f.error });
+        if (f.value.phone && await get("SELECT id FROM customers WHERE phone = ? AND id != ?", [f.value.phone, c.id]))
+            return res.status(400).json({ message: "Another customer already has this phone number" });
+        await run("UPDATE customers SET name=?, phone=?, email=?, consent=?, note=?, updated_at=? WHERE id=?",
+                  [f.value.name, f.value.phone, f.value.email, f.value.consent, f.value.note, localNow(), c.id]);
+        // Keep the name on their receipts up to date
+        if (f.value.name !== c.name) await run("UPDATE sales SET customer = ? WHERE customer_id = ?", [f.value.name, c.id]);
+        const changed = ["name", "phone", "email", "consent"].filter(k => (f.value[k] ?? null) !== (c[k] ?? null));
+        await writeAudit({ user: req.user, action: "EDIT_CUSTOMER", note: `${f.value.name}: changed ${changed.join(", ") || "nothing"}` });
+        res.json(await get(`SELECT c.*, ${CUSTOMER_STATS} FROM customers c WHERE c.id = ?`, [c.id]));
+    }));
+
+    // Profile with full purchase history. Staff see the history too (to resend receipts) but never cost prices.
+    app.get("/api/customers/:id", requireAuth, h(async (req, res) => {
+        const c = await get(`SELECT c.*, ${CUSTOMER_STATS} FROM customers c WHERE c.id = ?`, [toInt(req.params.id)]);
+        if (!c) return res.status(404).json({ message: "Customer not found" });
+        const sales = await query(`SELECT id, receipt_no, total, item_count, payment_method, username, created_at, status, void_type
+                                   FROM sales WHERE customer_id = ? ORDER BY id DESC LIMIT 200`, [c.id]);
+        const items = sales.length ? await query(`SELECT sale_id, part_name, qty, unit_price, line_total FROM sale_items
+                                                  WHERE sale_id IN (${sales.map(() => "?").join(",")}) ORDER BY id`, sales.map(s => s.id)) : [];
+        for (const s of sales) s.items = items.filter(i => i.sale_id === s.id);
+        res.json({ ...c, sales });
+    }));
+
+    app.delete("/api/customers/:id", requireAdmin, h(async (req, res) => {
+        const c = await get("SELECT * FROM customers WHERE id = ?", [toInt(req.params.id)]);
+        if (!c) return res.status(404).json({ message: "Customer not found" });
+        // Their sales stay (with the name) — only the contact details are removed, e.g. if they ask to be forgotten
+        await client.batch([
+            { sql: "UPDATE sales SET customer_id = NULL WHERE customer_id = ?", args: [c.id] },
+            { sql: "DELETE FROM customers WHERE id = ?", args: [c.id] }
+        ], "write");
+        await writeAudit({ user: req.user, action: "DELETE_CUSTOMER", note: `Removed customer ${c.name} (their sales are kept)` });
+        res.json({ message: "Removed" });
+    }));
+
+    // The app tells the server when a receipt or statement was sent, so the record shows it (FR-75)
+    app.post("/api/customers/:id/sent", requireAuth, h(async (req, res) => {
+        const c = await get("SELECT * FROM customers WHERE id = ?", [toInt(req.params.id)]);
+        if (!c) return res.status(404).json({ message: "Customer not found" });
+        const channel = req.body?.channel === "email" ? "email" : "WhatsApp";
+        const what = String(req.body?.what || "receipt").slice(0, 80);
+        await writeAudit({ user: req.user, action: "RECEIPT_SENT", note: `${what} sent to ${c.name} by ${channel}` });
+        res.json({ ok: true });
+    }));
+
+    /* =========================
        SALES & RECEIPTS
     ========================= */
     async function saleWithItems(id, isAdmin) {
         const sale = await get("SELECT * FROM sales WHERE id = ?", [id]);
         if (!sale) return null;
         sale.items = await query("SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id", [id]);
+        sale.customer_info = sale.customer_id
+            ? await get("SELECT id, name, phone, email, consent FROM customers WHERE id = ?", [sale.customer_id]) : null;
         if (!isAdmin) {
             delete sale.total_cost;
             sale.items.forEach(i => delete i.unit_cost);
@@ -689,16 +839,21 @@ async function startServer() {
             const cost  = lines.reduce((s, l) => s + l.qty * (l.part.cost || 0), 0);
             const count = lines.reduce((s, l) => s + l.qty, 0);
 
+            const cust = await customerForSale(req.body, req.user, tx);
+            // A sale made offline is never lost over a mistyped phone number: it's saved with the name only
+            if (cust.error && !offline) { await tx.rollback(); return res.status(400).json({ message: cust.error }); }
+            const custRow = cust.error ? null : cust.value;
+
             const prefix = `R-${date.replace(/-/g, "")}-`;
             const last = await get("SELECT receipt_no FROM sales WHERE receipt_no LIKE ? ORDER BY id DESC LIMIT 1", [prefix + "%"], tx);
             const receipt = prefix + String(last ? parseInt(last.receipt_no.slice(prefix.length), 10) + 1 : 1).padStart(4, "0");
 
             const { lastInsertRowid: saleId } = await run(
                 `INSERT INTO sales (receipt_no, customer, total, total_cost, item_count, user_id, username, sale_date, created_at,
-                                    payment_method, client_ref, sent_offline)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [receipt, customer, total, cost, count, req.user.id, req.user.username, date, now, method,
-                 ref || null, offline ? localNow() : null], tx);
+                                    payment_method, client_ref, sent_offline, customer_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [receipt, custRow ? custRow.name : customer, total, cost, count, req.user.id, req.user.username, date, now, method,
+                 ref || null, offline ? localNow() : null, custRow ? custRow.id : null], tx);
 
             for (const { part, qty } of lines) {
                 await run(`INSERT INTO sale_items (sale_id, part_id, part_name, sku, qty, unit_price, unit_cost, line_total)

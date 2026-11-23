@@ -160,3 +160,17 @@ offline counts/receiving; stock receiving sessions with a review screen.
   ₦100,000 (₦850K). Point at the amount on a computer, or tap it on a phone, to see the exact figure.
   Receipts, WhatsApp receipts and printed labels always show the full amount.
 - SRS updated to v1.4 (`docs/SRS.md`): build status, installed apps, display rules, and the digital receipts feasibility study.
+
+---
+
+# Customer profiles and one-tap receipts — 23 Nov 2026 (late night)
+- **Customers**: name, phone, email, note and consent. Phone numbers are saved one way (+2348031234567) however they're
+  typed; one phone = one customer, even when added on two devices offline.
+- **Sell screen**: the customer box searches saved customers by name or phone as you type, or adds a new one with phone/email.
+- **Receipt**: *WhatsApp [name]* opens WhatsApp straight to the customer's number with the receipt typed; *Email* opens the
+  mail app. Free — it sends from the shop's own WhatsApp / email.
+- **Customers screen** (new, for staff and owner): visits, total spent, last visit; each customer's full purchase list;
+  **WhatsApp history / Email history** sends the chain of their purchases with the total spent.
+- Owner can **Forget** a customer (contact details deleted, sales kept). Adding, editing, forgetting and sending are logged.
+- Offline: customers can be added during an offline sale; a mistyped phone never stops an offline sale from saving.
+- SRS v1.5 (`docs/SRS.md`, section 17).
