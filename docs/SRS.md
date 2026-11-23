@@ -2,8 +2,10 @@
 
 **Version:** 1.5 (update to SRS v1.2)  
 **Date:** 23 November 2026  
-**Owner:** Perpetua Ijeoma Muokwe  
-**Status:** Draft. Release 7 is planned to start after the SRS v1.2 updates are live and the tester period has ended.
+**Owner:** MMM  
+**Status:** Demo test for Dr Dami
+
+> **Why "SpareParts Pro".** I built this app for my Dad and his business partners, who run a spare-parts business, to help them keep track of their stock. The name comes straight from that first use: it was made for a spare-parts shop.
 
 > **How to read this version.** SRS v1.2 (part of the SpareParts Pro document pack, with the Brainstorming Register and Business Proposal v2) remains the base document. This file records:
 > 1. the build status of every v1.2 requirement as of 23 Nov 2026 (section 2),
