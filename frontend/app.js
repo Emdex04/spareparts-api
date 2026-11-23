@@ -66,14 +66,29 @@ function naira(n) {
     const v = Number(n || 0);
     return "₦" + v.toLocaleString("en-NG", { minimumFractionDigits: 0, maximumFractionDigits: Number.isInteger(v) ? 0 : 2 });
 }
-// ₦1.25m / ₦85k for tight spaces (stat cards, chart labels); the full figure shows on hover
-function nairaShort(n) {
+// Big amounts read short: ₦2.53M, ₦1.2B (₦850K in tight spaces). Point at it (or tap on a phone) to see the exact amount.
+// Receipts, WhatsApp receipts and printed labels always show the full amount.
+function nairaShort(n, from = 1e5) {
     const v = Number(n || 0), a = Math.abs(v);
-    if (a >= 1e9) return "₦" + +(v / 1e9).toFixed(2) + "bn";
-    if (a >= 1e6) return "₦" + +(v / 1e6).toFixed(2) + "m";
-    if (a >= 1e5) return "₦" + +(v / 1e3).toFixed(0) + "k";
+    if (a >= 1e9) return "₦" + (v / 1e9).toFixed(2) + "B";
+    if (a >= 1e6) return "₦" + (v / 1e6).toFixed(2) + "M";
+    if (a >= 1e5 && from <= 1e5) return "₦" + +(v / 1e3).toFixed(0) + "K";
     return naira(v);
 }
+function shortSpan(n, from) {
+    const full = naira(n), short = nairaShort(n, from);
+    return short === full ? full
+        : `<span class="amt" title="${full}" data-full="${full}" data-short="${short}" tabindex="0" role="button" aria-label="${full}">${short}</span>`;
+}
+const money      = n => shortSpan(n, 1e6);   // tables, lists, totals: shortened from ₦1M
+const moneyShort = n => shortSpan(n, 1e5);   // summary cards and chart labels: shortened from ₦100K
+// Phones have no hover: tap a short amount to see the full one, tap again to shorten it
+document.addEventListener("click", e => {
+    const el = e.target.closest?.(".amt");
+    if (!el || !matchMedia("(hover: none)").matches) return;     // computers use hover instead
+    e.stopPropagation();
+    el.textContent = el.textContent === el.dataset.full ? el.dataset.short : el.dataset.full;
+}, true);
 const count = (n, one, many) => `${Number(n).toLocaleString("en-NG")} ${n === 1 ? one : (many ?? one + "s")}`;
 
 function todayLocal() {
@@ -492,7 +507,7 @@ function renderDashboard(withSales) {
         </div>
         <div class="stat green">
             <div class="label"><i class="fa-solid fa-sack-dollar"></i>Stock value</div>
-            <div class="value" title="${naira(value)}">${nairaShort(value)}</div>
+            <div class="value">${moneyShort(value)}</div>
             <div class="sub">at selling price</div>
         </div>`;
 
@@ -524,7 +539,7 @@ async function loadTodaySummary() {
         const { sales } = await apiFetch(`/sales?date=${todayLocal()}`);
         const kept = sales.filter(isLive);
         const total = kept.reduce((s, x) => s + x.total, 0);
-        $("todayHeading").innerHTML = `${isAdmin() ? "Today's sales" : "Your sales today"} <span class="muted">${count(kept.length, "sale")} · ${naira(total)}</span>`;
+        $("todayHeading").innerHTML = `${isAdmin() ? "Today's sales" : "Your sales today"} <span class="muted">${count(kept.length, "sale")} · ${money(total)}</span>`;
         list.innerHTML = sales.length ? sales.slice(0, 8).map(saleRow).join("")
             : `<div class="empty" style="border:0;"><i class="fa-solid fa-receipt"></i>No sales yet today.</div>`;
     } catch (err) {
@@ -542,7 +557,7 @@ function saleRow(s) {
                 <strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}
                 <div class="muted">${receiptShort(s.receipt_no)} · ${count(s.item_count, "item")} · ${esc(PAY_LABELS[s.payment_method] || "Cash")}${isAdmin() ? " · " + esc(s.username) : ""}</div>
             </div>
-            <div class="list-end"><strong>${naira(s.total)}</strong><span class="muted small">${fmtTime(s.created_at)}</span></div>
+            <div class="list-end"><strong>${money(s.total)}</strong><span class="muted small">${fmtTime(s.created_at)}</span></div>
         </div>`;
 }
 // Cancelled / returned sales stay on record but don't count in any total
@@ -566,7 +581,7 @@ function renderInventory() {
             </td>
             <td class="num" data-label="In stock"><strong>${p.qty.toLocaleString("en-NG")}</strong></td>
             <td data-label="Status"><span class="pill ${s}">${STATUS_LABEL[s]}</span></td>
-            <td class="num" data-label="Price"><span>${naira(p.price)}${isAdmin() && p.cost ? `<span class="muted small block">cost ${naira(p.cost)}</span>` : ""}</span></td>
+            <td class="num" data-label="Price"><span>${money(p.price)}${isAdmin() && p.cost ? `<span class="muted small block">cost ${money(p.cost)}</span>` : ""}</span></td>
             <td class="actions">
                 <button class="btn btn-soft btn-sm" onclick="openRestockModal(${p.id})"><i class="fa-solid fa-plus"></i> Stock</button>
                 ${isAdmin() ? `
@@ -732,7 +747,7 @@ function updateSalePreview() {
     const left = leftFor(p);
     box.innerHTML = qty > left
         ? `<span class="warn">Only ${left} left in stock</span>`
-        : `${left} left · ${qty > 0 ? `${qty} × ${naira(p.price)} = <strong>${naira(qty * p.price)}</strong>` : naira(p.price) + " each"}`;
+        : `${left} left · ${qty > 0 ? `${qty} × ${money(p.price)} = <strong>${money(qty * p.price)}</strong>` : money(p.price) + " each"}`;
 }
 
 function addToCart() {
@@ -778,16 +793,16 @@ function renderCart() {
         total += line;
         return `
         <div class="cart-line">
-            <div class="cart-line-main"><strong>${esc(p.name)}</strong><span>${naira(p.price)} each</span></div>
+            <div class="cart-line-main"><strong>${esc(p.name)}</strong><span>${money(p.price)} each</span></div>
             <div class="stepper">
                 <button onclick="changeCartQty(${p.id}, -1)" aria-label="One less">−</button>
                 <span>${c.qty}</span>
                 <button onclick="changeCartQty(${p.id}, 1)" aria-label="One more">+</button>
             </div>
-            <div class="cart-line-total">${naira(line)}</div>
+            <div class="cart-line-total">${money(line)}</div>
         </div>`;
     }).join("") : `<div class="cart-empty"><i class="fa-solid fa-cart-shopping"></i>&nbsp; Nothing added yet</div>`;
-    $("cartTotal").textContent = naira(total);
+    $("cartTotal").innerHTML = money(total);
     $("completeSaleBtn").disabled = !state.cart.length;
 }
 
@@ -840,7 +855,7 @@ async function loadSalesHistory() {
         const kept = sales.filter(isLive);
         const total = kept.reduce((s, x) => s + x.total, 0);
         const voided = sales.length - kept.length;
-        $("historySummary").textContent = `${dayName(dateEl.value)} · ${count(kept.length, "sale")} · ${naira(total)}` +
+        $("historySummary").innerHTML = `${dayName(dateEl.value)} · ${count(kept.length, "sale")} · ${money(total)}` +
             (voided ? ` · ${voided} cancelled` : "");
         tbody.innerHTML = sales.length ? sales.map(s => `
             <tr class="clickable ${isLive(s) ? "" : "voided"}" onclick="viewReceipt(${s.id})">
@@ -848,7 +863,7 @@ async function loadSalesHistory() {
                 <td data-label="Time">${fmtTime(s.created_at)}</td>
                 <td data-label="Paid by">${esc(PAY_LABELS[s.payment_method] || "Cash")}</td>
                 <td data-label="Served by">${esc(s.username)}</td>
-                <td class="num" data-label="Total"><strong>${naira(s.total)}</strong></td>
+                <td class="num" data-label="Total"><strong>${money(s.total)}</strong></td>
             </tr>`).join("")
             : `<tr><td class="empty-cell" colspan="5">No sales ${dayDiff(dateEl.value) === 0 ? "yet today" : "on this day"}.</td></tr>`;
     } catch (err) {
@@ -983,7 +998,7 @@ function renderPending() {
     const sales = waiting.filter(o => kindOf(o) === "sale"), restocks = waiting.filter(o => kindOf(o) === "restock"),
           counts = waiting.filter(o => kindOf(o) === "count");
     const what = [
-        sales.length && `${count(sales.length, "sale")} (${naira(sales.reduce((t, s) => t + s.total, 0))})`,
+        sales.length && `${count(sales.length, "sale")} (${money(sales.reduce((t, s) => t + s.total, 0))})`,
         restocks.length && count(restocks.length, "restock"),
         counts.length && count(counts.length, "counted part")
     ].filter(Boolean).join(", ");
@@ -1400,12 +1415,12 @@ async function loadReport() {
         <div class="stat-grid">
             <div class="stat green">
                 <div class="label"><i class="fa-solid fa-sack-dollar"></i>Sales</div>
-                <div class="value" title="${naira(r.revenue)}">${nairaShort(r.revenue)}</div>
+                <div class="value">${moneyShort(r.revenue)}</div>
                 <div class="sub">${count(r.sales, "customer")}</div>
             </div>
             <div class="stat amber">
                 <div class="label"><i class="fa-solid fa-chart-line"></i>Profit</div>
-                <div class="value" title="${naira(r.profit)}">${nairaShort(r.profit)}</div>
+                <div class="value">${moneyShort(r.profit)}</div>
                 <div class="sub">${r.missing_cost_lines ? `${count(r.missing_cost_lines, "item")} without a cost price` : "after cost of parts"}</div>
             </div>
             <div class="stat blue">
@@ -1415,14 +1430,14 @@ async function loadReport() {
             </div>
             <div class="stat red">
                 <div class="label"><i class="fa-solid fa-user"></i>Average sale</div>
-                <div class="value" title="${naira(r.sales ? r.revenue / r.sales : 0)}">${nairaShort(r.sales ? Math.round(r.revenue / r.sales) : 0)}</div>
+                <div class="value">${moneyShort(r.sales ? Math.round(r.revenue / r.sales) : 0)}</div>
                 <div class="sub">per customer</div>
             </div>
         </div>
         ${r.missing_cost_lines ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-circle-info"></i>
             <div>Profit only counts parts that have a cost price. Add cost prices with <strong>Edit</strong> in Stock to see your full profit.</div></div>` : ""}
         ${r.voided?.count ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-rotate-left"></i>
-            <div>${count(r.voided.count, "sale")} worth ${naira(r.voided.value)} cancelled or returned on this day — not counted above. Open them in Sell → Sales to see why.</div></div>` : ""}
+            <div>${count(r.voided.count, "sale")} worth ${money(r.voided.value)} cancelled or returned on this day — not counted above. Open them in Sell → Sales to see why.</div></div>` : ""}
 
         <div class="section-title">End-of-day money check</div>
         ${renderCloseDay(r)}
@@ -1445,7 +1460,7 @@ async function loadReport() {
                     <thead><tr><th>Part</th><th class="num">Sold</th><th class="num">Amount</th></tr></thead>
                     <tbody>${r.top_parts.length ? r.top_parts.map(p => `
                         <tr><td class="card-title"><div class="part-name">${esc(p.part_name)}</div><div class="part-sub code">${esc(p.sku || "")}</div></td>
-                            <td class="num" data-label="Sold">${p.qty}</td><td class="num" data-label="Amount">${naira(p.revenue)}</td></tr>`).join("")
+                            <td class="num" data-label="Sold">${p.qty}</td><td class="num" data-label="Amount">${money(p.revenue)}</td></tr>`).join("")
                         : `<tr><td class="empty-cell" colspan="3">No sales on this day.</td></tr>`}</tbody>
                 </table></div>
             </div>
@@ -1454,7 +1469,7 @@ async function loadReport() {
                 <div class="table-wrap"><table class="table">
                     <thead><tr><th>Staff</th><th class="num">Customers</th><th class="num">Amount</th></tr></thead>
                     <tbody>${r.by_staff.length ? r.by_staff.map(s => `
-                        <tr><td class="card-title"><strong>${esc(s.username)}</strong></td><td class="num" data-label="Customers">${s.sales}</td><td class="num" data-label="Amount">${naira(s.revenue)}</td></tr>`).join("")
+                        <tr><td class="card-title"><strong>${esc(s.username)}</strong></td><td class="num" data-label="Customers">${s.sales}</td><td class="num" data-label="Amount">${money(s.revenue)}</td></tr>`).join("")
                         : `<tr><td class="empty-cell" colspan="3">No sales on this day.</td></tr>`}</tbody>
                 </table></div>
             </div>
@@ -1491,12 +1506,12 @@ async function loadPeriodReport(anchor) {
         <div class="stat-grid">
             <div class="stat green">
                 <div class="label"><i class="fa-solid fa-sack-dollar"></i>Sales</div>
-                <div class="value" title="${naira(r.revenue)}">${nairaShort(r.revenue)}</div>
-                <div class="sub">${count(r.sales, "customer")} · about ${nairaShort(Math.round(avgDay))} a day</div>
+                <div class="value">${moneyShort(r.revenue)}</div>
+                <div class="sub">${count(r.sales, "customer")} · about ${moneyShort(Math.round(avgDay))} a day</div>
             </div>
             <div class="stat amber">
                 <div class="label"><i class="fa-solid fa-chart-line"></i>Profit</div>
-                <div class="value" title="${naira(r.profit)}">${nairaShort(r.profit)}</div>
+                <div class="value">${moneyShort(r.profit)}</div>
                 <div class="sub">${r.missing_cost_lines ? `${count(r.missing_cost_lines, "item")} without a cost price` : "after cost of parts"}</div>
             </div>
             <div class="stat blue">
@@ -1506,14 +1521,14 @@ async function loadPeriodReport(anchor) {
             </div>
             <div class="stat red">
                 <div class="label"><i class="fa-solid fa-warehouse"></i>Stock now</div>
-                <div class="value" title="${naira(r.stock.cost_value || r.stock.sell_value)}">${nairaShort(r.stock.cost_value || r.stock.sell_value)}</div>
+                <div class="value">${moneyShort(r.stock.cost_value || r.stock.sell_value)}</div>
                 <div class="sub">${r.stock.cost_value ? "at cost" : "at selling price"} · ${r.stock.low} running low</div>
             </div>
         </div>
         ${r.missing_cost_lines ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-circle-info"></i>
             <div>Profit only counts parts that have a cost price, so the real figure is higher. Add cost prices with <strong>Edit</strong> in Stock.</div></div>` : ""}
         ${(r.voided.count || r.corrections.count) ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-magnifying-glass"></i><div>
-            ${r.voided.count ? `${count(r.voided.count, "sale")} worth ${naira(r.voided.value)} cancelled or returned (not counted above). ` : ""}
+            ${r.voided.count ? `${count(r.voided.count, "sale")} worth ${money(r.voided.value)} cancelled or returned (not counted above). ` : ""}
             ${r.corrections.count ? `${count(r.corrections.count, "stock correction")} (${r.corrections.units > 0 ? "+" : ""}${r.corrections.units} units). ` : ""}
             Details are in the Activity Log. These are things to check, not proof that anything is wrong.</div></div>` : ""}
 
@@ -1535,7 +1550,7 @@ async function loadPeriodReport(anchor) {
                     <thead><tr><th>Part</th><th class="num">Sold</th><th class="num">Amount</th></tr></thead>
                     <tbody>${r.top_parts.length ? r.top_parts.map(p => `
                         <tr><td class="card-title"><div class="part-name">${esc(p.part_name)}</div><div class="part-sub code">${esc(p.sku || "")}</div></td>
-                            <td class="num" data-label="Sold">${p.qty}</td><td class="num" data-label="Amount">${naira(p.revenue)}</td></tr>`).join("")
+                            <td class="num" data-label="Sold">${p.qty}</td><td class="num" data-label="Amount">${money(p.revenue)}</td></tr>`).join("")
                         : `<tr><td class="empty-cell" colspan="3">No sales in this period.</td></tr>`}</tbody>
                 </table></div>
             </div>
@@ -1545,7 +1560,7 @@ async function loadPeriodReport(anchor) {
                     <thead><tr><th>Part</th><th class="num">On shelf</th><th class="num">Money tied up</th></tr></thead>
                     <tbody>${r.slow_parts.length ? r.slow_parts.map(p => `
                         <tr><td class="card-title"><div class="part-name">${esc(p.name)}</div><div class="part-sub code">${esc(p.sku || "")}</div></td>
-                            <td class="num" data-label="On shelf">${p.qty}</td><td class="num" data-label="Money tied up">${naira(p.tied_up)}</td></tr>`).join("")
+                            <td class="num" data-label="On shelf">${p.qty}</td><td class="num" data-label="Money tied up">${money(p.tied_up)}</td></tr>`).join("")
                         : `<tr><td class="empty-cell" colspan="3">Everything in stock sold at least once.</td></tr>`}</tbody>
                 </table></div>
             </div>
@@ -1557,7 +1572,7 @@ async function loadPeriodReport(anchor) {
                 <div class="table-wrap"><table class="table">
                     <thead><tr><th>Staff</th><th class="num">Customers</th><th class="num">Amount</th></tr></thead>
                     <tbody>${r.by_staff.length ? r.by_staff.map(s => `
-                        <tr><td class="card-title"><strong>${esc(s.username)}</strong></td><td class="num" data-label="Customers">${s.sales}</td><td class="num" data-label="Amount">${naira(s.revenue)}</td></tr>`).join("")
+                        <tr><td class="card-title"><strong>${esc(s.username)}</strong></td><td class="num" data-label="Customers">${s.sales}</td><td class="num" data-label="Amount">${money(s.revenue)}</td></tr>`).join("")
                         : `<tr><td class="empty-cell" colspan="3">No sales in this period.</td></tr>`}</tbody>
                 </table></div>
             </div>
@@ -1566,7 +1581,7 @@ async function loadPeriodReport(anchor) {
                 <div class="table-wrap"><table class="table">
                     <thead><tr><th>Payment</th><th class="num">Amount</th><th class="num">Share</th></tr></thead>
                     <tbody>${["cash", "pos", "transfer"].map(m => `
-                        <tr><td class="card-title"><strong>${PAY_LABELS[m]}</strong></td><td class="num" data-label="Amount">${naira(r.by_method[m] || 0)}</td>
+                        <tr><td class="card-title"><strong>${PAY_LABELS[m]}</strong></td><td class="num" data-label="Amount">${money(r.by_method[m] || 0)}</td>
                             <td class="num" data-label="Share">${r.revenue ? Math.round((r.by_method[m] || 0) / r.revenue * 100) : 0}%</td></tr>`).join("")}</tbody>
                 </table></div>
             </div>
@@ -1581,9 +1596,9 @@ function renderCloseDay(r) {
     const row = (label, expected, counted) => {
         const diff = counted == null ? null : counted - expected;
         const cls  = diff == null ? "" : diff === 0 ? "ok" : diff < 0 ? "short" : "over";
-        const txt  = diff == null ? "—" : diff === 0 ? "✓ Matches" : (diff < 0 ? "Short by " : "Over by ") + naira(Math.abs(diff));
-        return `<tr><td class="card-title"><strong>${label}</strong></td><td class="num" data-label="App says">${naira(expected)}</td>
-                <td class="num" data-label="You counted">${counted == null ? "—" : naira(counted)}</td>
+        const txt  = diff == null ? "—" : diff === 0 ? "✓ Matches" : (diff < 0 ? "Short by " : "Over by ") + money(Math.abs(diff));
+        return `<tr><td class="card-title"><strong>${label}</strong></td><td class="num" data-label="App says">${money(expected)}</td>
+                <td class="num" data-label="You counted">${counted == null ? "—" : money(counted)}</td>
                 <td class="num" data-label="Difference"><span class="diff ${cls}">${txt}</span></td></tr>`;
     };
     return `

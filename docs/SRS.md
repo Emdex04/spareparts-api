@@ -1,6 +1,6 @@
 # SpareParts Pro — Software Requirements Specification
 
-**Version:** 1.3 (update to SRS v1.2)
+**Version:** 1.4 (update to SRS v1.2)
 **Date:** 23 November 2026
 **Owner:** Perpetua Ijeoma Muokwe
 **Status:** Draft. Release 7 is planned to start after the SRS v1.2 updates are live and the tester period has ended.
@@ -8,7 +8,8 @@
 > **How to read this version.** SRS v1.2 (part of the SpareParts Pro document pack, with the Brainstorming Register and Business Proposal v2) remains the base document. This file records:
 > 1. the build status of every v1.2 requirement as of 23 Nov 2026 (section 2),
 > 2. corrections to v1.2 (section 3),
-> 3. the new **Release 7: Genuine Parts Trail** (sections 4–12).
+> 3. the new **Release 7: Genuine Parts Trail** (sections 4–12),
+> 4. the **installed apps** (Windows, Android) and display rules (sections 14–15), and the **digital receipts** feasibility study (section 16), added in v1.4.
 >
 > Requirement IDs from v1.2 (FR-01 to FR-29, E-FR-03, UC-01 to UC-04, Releases 1–6) keep their numbers. New items start at FR-30 and UC-05 so nothing clashes. When v1.2's full text is merged into this file, sections 2 and 3 replace v1.2's status notes.
 
@@ -19,7 +20,8 @@
 | Version | Date | Changes |
 |---|---|---|
 | 1.2 | Nov 2026 | Base document (document pack): Releases 1–6. |
-| 1.3 | 23 Nov 2026 | Build status of Releases 1–3 recorded. Corrections to "missing features" list. Release 7 (Genuine Parts Trail) added, with its requirements, use cases, data model, risks and acceptance tests. Release order updated. |
+| 1.3 | 23 Nov 2026 | Releases 1–3 went live; Windows/Android apps added. Build status of Releases 1–3 recorded. Corrections to "missing features" list. Release 7 (Genuine Parts Trail) added, with its requirements, use cases, data model, risks and acceptance tests. Release order updated. |
+| 1.4 | 23 Nov 2026 | Offline restocking and stock counting built (Release 3 now built except offline receiving sessions). Installed Windows and Android apps (FR-61 to FR-66). Display rules: upright font, short big amounts (FR-67, FR-68). Digital receipts by email, WhatsApp and SMS: feasibility and proposed requirements (FR-69 to FR-75). |
 
 ---
 
@@ -27,13 +29,16 @@
 
 | Release | Content | Status (23 Nov 2026) |
 |---|---|---|
-| 1 | Accountability: staff on each sale, receipt numbers, sign-in records, cancel/return with reason, no double-saved sales | **Built.** Not live until pushed to GitHub. |
-| 2 | Stock control: stock count sessions, owner review of differences | **Built.** Not live until pushed. |
-| 3 | Working offline | **Partly built.** Offline sales done; offline counts and receiving not done. |
+| 1 | Accountability: staff on each sale, receipt numbers, sign-in records, cancel/return with reason, no double-saved sales | **Built and live** (23 Nov 2026). |
+| 2 | Stock control: stock count sessions, owner review of differences | **Built and live** (23 Nov 2026). |
+| 3 | Working offline | **Built** (except receiving sessions, which belong to Release 4). Offline sales, restocking and counting; apps open offline. **Live** (23 Nov 2026). |
+| 3b | Installed apps: Windows (.exe) and Android (.apk) | **Built.** Pushed to GitHub 23 Nov 2026; installer and Android app come from GitHub → Actions → Build apps. |
 | 4 | Stock receiving sessions with review screen | Not started |
 | 5 | Guided tutorials with voice, practice mode, French/Igbo | Not started |
 | 6 | Configurable product fields and units for other trades (bearings, plastics, electrical) | Not started |
-| — | Tester period (2 shops, about 2 weeks) | Next, after push |
+| 6b | Digital receipts (section 16): Phase A free (WhatsApp to the customer's number, email, receipt link) | **Proposed.** Feasible now at no cost. |
+| 6c | Digital receipts Phase B: fully automatic WhatsApp / SMS | **Proposed.** Paid per message; decide after testers. |
+| — | Tester period (2 shops, about 2 weeks) | Next |
 | — | Multi-shop version with Paystack paywall | Decide after testing |
 | **7** | **Genuine Parts Trail** (this document, sections 4–12) | **Planned.** Starts after Releases 1–3 are live and testing is done. Phase 7B needs the multi-shop version. |
 
@@ -51,7 +56,9 @@
 | FR-11 to FR-13, UC-04 | Sales recorded offline and sent later | Built (23 Nov) | Sell screen, yellow "waiting" bar |
 | FR-14 | A sale is never saved twice | Built (23 Nov) | Sale reference from the phone |
 | FR-29 | Unknown barcodes rejected; never change stock | Built (23 Nov) | Selling and counting |
-| Release 3 (rest) | Offline stock counts and receiving | Not built | — |
+| Release 3 (rest) | Offline restocking and stock counting (a count must be started online) | Built (23 Nov, v1.4) | Stock, Stock Count; yellow "waiting" bar |
+| FR-61 to FR-66 | Installed Windows and Android apps | Built (23 Nov, v1.4) | `desktop/`, `mobile/`, APPS.md |
+| FR-67, FR-68 | Upright font; amounts from ₦1M shown short (₦2.53M) with the full amount on hover or tap | Built (23 Nov, v1.4) | Every screen except receipts |
 | Release 4 | Receiving sessions with review | Not built | — |
 | Release 5 | Voice guidance, tutorials, practice mode, French/Igbo | Not built | — |
 | Release 6 | Product fields and units per trade | Not built | — |
@@ -289,3 +296,69 @@ New owner endpoints: issue, list, void, alerts, report.
 2. Which label stock: scratch-off stickers vs fold-over labels, and the local supplier for them.
 3. Which parts to pilot first: fast-moving, often-faked items (brake pads, filters, plugs, bearings).
 4. Who the first supplier partner for Phase 7B is.
+
+---
+
+## 14. Installed apps (added in v1.4)
+
+**Decision (23 Nov 2026):** installed apps that share the one online data store, rather than a fully local database per device. The PC, phones and website always see the same stock and sales; offline work waits on the device and is sent later.
+
+| ID | Requirement | Status |
+|---|---|---|
+| FR-61 | A Windows app (.exe installer and portable .exe) with its own icon, window and desktop shortcut. | Built (Electron, `desktop/`) |
+| FR-62 | An Android app (.apk) with its own icon; camera scanning works inside the app. | Built (Capacitor, `mobile/`); APK built by GitHub Actions |
+| FR-63 | The app's screens are stored inside the app, so it opens instantly and with no internet; the barcode reader, icons and fonts are stored inside too. | Built |
+| FR-64 | Without internet, the app stays signed in and shows the last stock list received. The server still checks every action when it arrives. | Built |
+| FR-65 | Sign-in screen lets the user set the shop's server address (each tester's shop has its own). Changing it clears the old shop's sign-in and stock list. Offline work is kept per shop server and per person. | Built |
+| FR-66 | Restocks sent from the app carry a device reference; the server adds each restock once only, even if it arrives twice (same rule as sales, FR-14). | Built (`op_refs` table) |
+
+**Not covered:** an iPhone app (needs a Mac and an Apple Developer account, $99/year); iPhone users add the website to the Home Screen. Play Store publishing (Google Play account, one-time $25, signed release build) is a later step. Printing from the Android app is not supported; receipts are shared instead.
+
+**Acceptance tests**
+| # | Test | Expected result |
+|---|---|---|
+| AT-14 | Open the app with the network off, after one earlier online sign-in | App opens signed in; stock list from the last connection; yellow notice. |
+| AT-15 | Restock and count offline; reconnect | Both are sent in order; stock on the server matches the device; nothing added twice. |
+| AT-16 | Send the same restock reference twice | Stock goes up once; second reply marked duplicate. |
+| AT-17 | Change the server address on the sign-in screen | Address checked first; old sign-in cleared; new shop's name shown. |
+
+## 15. Display rules (added in v1.4)
+
+| ID | Requirement | Status |
+|---|---|---|
+| FR-67 | Headings and numbers use a plain, upright font (Inter), stored inside the app; codes use IBM Plex Mono. Numbers line up in columns. | Built |
+| FR-68 | On screen, amounts of ₦1,000,000 and above are written short with two decimals (₦2.53M, ₦1.20B); summary cards also shorten from ₦100,000 (₦850K). Hovering (computer) or tapping (phone) shows the exact amount. Receipts, WhatsApp receipts and printed labels always show the full amount. | Built |
+
+## 16. Digital receipts — feasibility study (added in v1.4)
+
+**Question:** can a receipt be sent to the customer automatically by email or phone after each sale?
+
+**Short answer:** yes. Email and a one-tap WhatsApp send are free and can be built now. Fully automatic WhatsApp or SMS works but costs money per receipt and needs registration with Meta or the mobile networks, so it should wait until the testers show customers want it.
+
+### 16.1 Findings (checked 23 Nov 2026)
+
+| Channel | How | Cost | Set-up burden | Notes |
+|---|---|---|---|---|
+| WhatsApp, one tap (from the shop's own WhatsApp) | App opens WhatsApp with the customer's number and the receipt already typed; staff tap Send. | Free | None | Already half-built: the Share button. Needs the customer's phone number on the sale. |
+| Email, automatic | Server sends through an email service's web API (Brevo). | Free up to 300 emails/day (Brevo Free plan); "Sent with Brevo" note on free emails. | An account and an API key per installation. | Render's free plan blocks normal email ports (SMTP) since Sept 2025, so the web API must be used. Many walk-in customers have no email. |
+| WhatsApp, automatic (WhatsApp Business Platform) | Server sends an approved "utility" template message. | About ₦14 per receipt (Meta rate for Nigeria, from 1 Oct 2026). | Meta business verification, a dedicated phone number, approved template; per shop. | Most familiar channel for Nigerian buyers. |
+| SMS, automatic | Through a Nigerian provider (e.g. Termii) on a transactional route. | About ₦6.50 per SMS page; a receipt with the ₦ sign drops to 70 characters a page, so 2–3 pages (₦13–20). | Alphanumeric sender ID must be registered with every network; transactional IDs need NCC approval and company (CAC) papers. | Reaches any phone, including non-smartphones. Write "NGN" instead of "₦" to keep pages down. |
+| Receipt link page | Each sale gets a private, hard-to-guess link showing the receipt; the link goes out by any channel above. | Free | None | Short SMS/WhatsApp messages; the same page can later show Genuine Parts Trail tags (Release 7). |
+
+### 16.2 Proposed requirements
+
+| ID | Requirement | Phase |
+|---|---|---|
+| FR-69 | A sale can record the customer's phone number and/or email (both optional), with a tick box for consent to receive the receipt. | A |
+| FR-70 | After a sale, buttons: **WhatsApp receipt** (opens WhatsApp to that number, text ready), **Email receipt**. The owner can set either to happen automatically. | A |
+| FR-71 | Each receipt gets a public link with an unguessable reference; the page shows only what the paper receipt shows (no cost, staff or stock data). | A |
+| FR-72 | Email receipts are sent through a provider's HTTPS API (not SMTP); the API key is set as a server setting, never in the app. | A |
+| FR-73 | Sends made offline wait in the offline queue with the sale and go out when the sale reaches the server. | A |
+| FR-74 | Automatic WhatsApp (Business Platform) and SMS sending, with a monthly message budget and a count on the Reports screen. | B |
+| FR-75 | The receipt record shows whether and how it was sent (sent / failed / not sent). Customer contact details follow the Nigeria Data Protection Act 2023 (consent, no marketing without opt-in). | A and B |
+
+### 16.3 Recommendation
+Build Phase A (free) with the tester release: phone number on the sale, one-tap WhatsApp, email through Brevo's API, and the receipt link page. Ask the testers whether customers use them, then decide on Phase B (about ₦14 per WhatsApp receipt or ₦13–20 per SMS receipt), which could be charged to shops as a paid add-on.
+
+**Same idea outside spare parts:** the same receipt engine could send school fee receipts, or short learning-support session notes, to parents by WhatsApp or email.
+

@@ -150,3 +150,13 @@ offline counts/receiving; stock receiving sessions with a review screen.
 - The barcode reader and icons are now inside the app (`frontend/vendor/`) instead of loaded from the internet,
   so scanning works offline on the website too.
 - Friendlier messages when offline on the dashboard and sales list.
+
+---
+
+# Look and big numbers — 23 Nov 2026 (night)
+- New font: headings and numbers use **Inter**, a plain upright font, instead of the wide decorative one. Stored inside the app
+  (`frontend/vendor/fonts/`), so it looks the same offline. Numbers line up in columns.
+- Big amounts read short: from ₦1,000,000 they show as **₦2.53M** (₦1.20B for billions); summary cards also shorten from
+  ₦100,000 (₦850K). Point at the amount on a computer, or tap it on a phone, to see the exact figure.
+  Receipts, WhatsApp receipts and printed labels always show the full amount.
+- SRS updated to v1.4 (`docs/SRS.md`): build status, installed apps, display rules, and the digital receipts feasibility study.

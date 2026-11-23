@@ -2,7 +2,7 @@
    - The app's own files are kept on the phone, so the app still opens with no internet.
    - Shop data (/api) always comes from the server. With no internet the app gets a clear
      "offline" answer (status 503) and keeps sales on the phone until the connection is back. */
-const CACHE_NAME = "spareparts-v8";
+const CACHE_NAME = "spareparts-v9";
 
 const APP_FILES = [
     "./",
@@ -16,7 +16,12 @@ const APP_FILES = [
     "./vendor/fontawesome/css/all.min.css",
     "./vendor/fontawesome/webfonts/fa-solid-900.woff2",
     "./vendor/fontawesome/webfonts/fa-regular-400.woff2",
-    "./vendor/fontawesome/webfonts/fa-brands-400.woff2"
+    "./vendor/fontawesome/webfonts/fa-brands-400.woff2",
+    "./vendor/fonts/fonts.css",
+    "./vendor/fonts/inter-latin-wght-normal.woff2",
+    "./vendor/fonts/inter-latin-ext-wght-normal.woff2",
+    "./vendor/fonts/ibm-plex-mono-latin-400-normal.woff2",
+    "./vendor/fonts/ibm-plex-mono-latin-500-normal.woff2"
 ];
 
 self.addEventListener("install", event => {

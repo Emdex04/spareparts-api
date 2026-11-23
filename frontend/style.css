@@ -27,8 +27,8 @@
     --sidebar-w: 248px;
     --radius:    12px;
     --radius-sm: 8px;
-    --font-head: 'Syne', system-ui, sans-serif;
-    --font-body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --font-head: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;   /* plain, upright letters */
+    --font-body: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, Consolas, monospace;
     color-scheme: dark;
 }
@@ -427,6 +427,10 @@ input[type="date"].input { width: auto; padding: 8px 10px; }
 #serverForm { margin-top: 12px; }
 #serverForm input { width: 100%; margin: 4px 0 8px; }
 .server-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+/* Numbers line up in columns; short big amounts (₦2.53M) show the full figure on hover or tap */
+.num, .stat .value, .cart-total strong, .rc-total strong, .list-end strong, .cart-line-total, .bar-val { font-variant-numeric: tabular-nums; }
+.amt { cursor: help; border-bottom: 1px dotted currentColor; text-decoration: none; }
+.amt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
 .btn-danger { background: var(--out); color: #fff; }
 .btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
 .small-pill { font-size: 11px; padding: 2px 8px; vertical-align: middle; }

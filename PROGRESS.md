@@ -1,12 +1,11 @@
 # SpareParts Pro — where things stand (23 Nov 2026)
 
-## New on 23 Nov 2026 (from the SRS v1.2 document pack) — NOT LIVE until pushed to GitHub
+## New on 23 Nov 2026 (from the SRS v1.2 document pack) — LIVE since 23 Nov 2026, 11:22 pm
 - Sign-ins recorded · cancel/return a sale with a reason · sales can't be saved twice
 - Stock Count screen with owner review of differences
 - Weekly and monthly reports (incl. parts not selling)
 - Sales keep working without internet and send themselves later
 - Details: CHANGES.md (bottom section). Old version kept in _backup_2026-11-23.
-- To go live: push this folder to GitHub (main) → Render updates itself. The database upgrades itself on first start.
 - After it's live, try: one sale, cancel it, run a small stock count, open Reports → Week.
 - NEW: Windows + Android apps — test copy of the Windows app is in Downloads\SpareParts_Pro_Document_Pack_2026-11-17.
   After pushing, GitHub → Actions → Build apps gives the installer and the Android .apk. Steps: APPS.md
