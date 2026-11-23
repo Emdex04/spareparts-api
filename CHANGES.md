@@ -91,3 +91,62 @@ Backup of the previous version: _backup_2026-10-22
   WhatsApp receipts, the sign-in screen and the top of the app.
 - Activity log uses plain words ("Stock added", "Day check") and money with commas.
 - All styling moved out of index.html into style.css.
+
+---
+
+# SRS v1.2 updates — 23 Nov 2026
+Built from the SpareParts Pro document pack (SRS v1.2, Brainstorming Register, Business Proposal v2).
+Backup of the version before this: `_backup_2026-11-23`.
+
+## Accountability (SRS Release 1)
+- **Sign-ins are recorded** (E-FR-03): every sign-in, sign-out, wrong password and 10-minute lock appears in the Activity Log with the time.
+- **Cancel or return a sale** (FR-03): owner opens a receipt → *Cancel / return* → picks "entered by mistake" or "customer brought it back" and gives a reason.
+  The parts go back into stock. The sale is never deleted: it stays in the list crossed out, the receipt shows CANCELLED/RETURNED with who, when and why,
+  and it is left out of every total, report and the end-of-day money check.
+- **A sale is never saved twice** (FR-14): each sale carries its own reference from the phone. A double tap, a retry or a sale re-sent after
+  the internet comes back returns the first sale instead of making a second one and deducting stock twice.
+- Each sale already carried the signed-in staff member, a receipt number and time (FR-01, FR-02) — kept as it was.
+
+## Stock control (SRS Release 2)
+- **New Stock Count screen** (FR-04, FR-05, UC-02), for staff and owner:
+  1. *Start counting* (optionally name it, e.g. "Shelf A").
+  2. Scan items (each beep adds one — scans here never sell anything) or type the number seen for each part.
+  3. Staff press *Send to owner*. The owner sees a red number on Stock Count, opens the count and sees each difference.
+  4. Owner ticks the parts to correct, writes a note, and approves — or *Sets aside* the count with no stock change.
+- Corrections move stock by the difference found **at the time of counting**, so sales made after the count are not undone.
+- Every step is in the Activity Log. The screen reminds the owner that a difference is something to check, not proof of theft.
+- Unknown barcodes are rejected clearly in counting and selling; they never change stock (FR-29).
+
+## Reports (FR-06, FR-07)
+- Reports now has **Day / Week / Month**. Week = the 7 days ending on the chosen date; Month = that date's calendar month.
+- Week and month show: sales, profit (only from parts with a cost price, clearly labelled), items sold, current stock value,
+  day-by-day chart, best sellers, **parts not selling** (in stock but no sales, with money tied up), sales by staff, how customers paid,
+  and how many sales were cancelled and stock corrections made.
+- The daily report now leaves out cancelled sales and says how many there were.
+
+## Working without internet (SRS Release 3 — first step)
+- **Sales keep working offline** (FR-11–FR-13, UC-04): if there is no connection when *Complete sale* is pressed, the sale is kept on the phone,
+  the stock on screen goes down, and a yellow bar shows "1 sale waiting to be sent". It is sent automatically when the internet returns
+  (or press *Send now*). The sale keeps the time it really happened and is marked "recorded offline".
+- If the server refuses an offline sale (e.g. someone else sold the last one meanwhile), a red bar explains why so the owner can check.
+- The app now opens without internet (it is saved on the phone), stays signed in, and shows the stock list from the last connection.
+- Fixed: before, a sale pressed while offline could show "Sale saved — ₦NaN" and empty the cart without saving anything.
+- Fixed: a short internet drop when opening the app no longer signs the user out.
+- Still online-only: stock counts, adding/editing parts, restocking and reports.
+
+## Not built yet (later releases in the SRS)
+Text-to-speech and guided tutorials, French/Igbo, practice mode (Release 5); configurable product fields and units for other trades (Release 6);
+offline counts/receiving; stock receiving sessions with a review screen.
+
+---
+
+# Windows and Android apps — 23 Nov 2026 (later)
+- **Windows app** (`desktop/`) and **Android app** (`mobile/`): SpareParts Pro installed with its own icon, opening instantly
+  even with no internet. Data stays on the shop's online server, shared by the PC, phones and website. See **APPS.md**.
+- GitHub builds the Windows installer and the Android .apk for free (`.github/workflows/build-apps.yml`).
+- Sign-in screen in the apps: **Change** the shop server address (for testers with their own shop copy).
+- **Offline now covers restocking and stock counting too**, not just sales. Everything waits on the device and is sent
+  in order when the internet is back; restocks, like sales, can never be added twice (server checks each one's reference).
+- The barcode reader and icons are now inside the app (`frontend/vendor/`) instead of loaded from the internet,
+  so scanning works offline on the website too.
+- Friendlier messages when offline on the dashboard and sales list.

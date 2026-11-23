@@ -4,3 +4,8 @@ node_modules/
 backups/
 _backup_*/
 .env
+# Apps: built files and copies of the screens (made by scripts/copy-web.js)
+desktop/dist/
+desktop/web/
+mobile/www/
+*.apk

@@ -1,0 +1,12 @@
+{
+  "appId": "com.spareparts.pro",
+  "appName": "SpareParts Pro",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#0b0d12"
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

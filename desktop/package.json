@@ -1,0 +1,41 @@
+{
+  "name": "spareparts-pro-desktop",
+  "productName": "SpareParts Pro",
+  "version": "1.0.0",
+  "description": "SpareParts Pro — stock, sales and receipts for spare parts dealers",
+  "author": "Perpetua Muokwe",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "web": "node ../scripts/copy-web.js desktop",
+    "start": "npm run web && electron .",
+    "dist": "npm run web && electron-builder --win nsis portable --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.spareparts.pro",
+    "productName": "SpareParts Pro",
+    "copyright": "SpareParts Pro",
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": ["main.js", "web/**/*", "build/icon.png", "package.json"],
+    "win": {
+      "icon": "build/icon.ico",
+      "artifactName": "SpareParts-Pro-${version}-${arch}-${target}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SpareParts Pro",
+      "artifactName": "SpareParts-Pro-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "SpareParts-Pro-Portable-${version}.${ext}"
+    }
+  }
+}

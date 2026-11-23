@@ -418,6 +418,39 @@ input[type="date"].input { width: auto; padding: 8px 10px; }
 
 #labelSheet { display: none; }
 @page { size: A4; margin: 15mm 7mm; }
+
+/* 10b. NOV 2026 — cancelled sales, offline queue, report ranges, stock counts */
+.server-box { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.server-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.server-line span { color: var(--text2); word-break: break-all; }
+.link-btn { background: none; border: 0; color: var(--accent2); font-weight: 600; cursor: pointer; padding: 0 2px; font-size: 12.5px; }
+#serverForm { margin-top: 12px; }
+#serverForm input { width: 100%; margin: 4px 0 8px; }
+.server-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.btn-danger { background: var(--out); color: #fff; }
+.btn-danger:hover:not(:disabled) { filter: brightness(1.08); }
+.small-pill { font-size: 11px; padding: 2px 8px; vertical-align: middle; }
+.voided strong, .voided .num strong, .list-row.voided .list-end strong { text-decoration: line-through; opacity: .6; }
+.rc-void { margin-top: 12px; padding: 10px; border: 2px dashed #dc2626; color: #b91c1c; border-radius: 8px; text-align: center; font-size: 12px; }
+.rc-void strong { font-size: 15px; letter-spacing: .08em; }
+.pending-note { align-items: center; }
+.pending-note > div { flex: 1; }
+.seg { display: inline-flex; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px; gap: 2px; }
+.seg-btn { background: none; border: 0; color: var(--text2); padding: 6px 12px; border-radius: 6px; font-weight: 600; font-size: 13px; cursor: pointer; }
+.seg-btn.active { background: var(--accent); color: #fff; }
+.header-actions { flex-wrap: wrap; }
+.bars.many .bar-val { display: none; }
+.bars.many .bar-day { font-size: 9.5px; }
+.count-input { width: 90px; text-align: right; padding: 7px 9px; }
+.count-row-diff { font-weight: 600; }
+.diff-pos { color: var(--ok); }
+.diff-neg { color: var(--out); }
+.count-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.count-head h3 { margin: 0; }
+.mini-stats { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--text2); }
+.mini-stats strong { color: var(--text); font-size: 15px; }
+.table tr.counted td { background: color-mix(in srgb, var(--accent-bg) 60%, transparent); }
+
 @media print {
     body.printing-receipt * { visibility: hidden !important; }
     body.printing-receipt #receiptBody, body.printing-receipt #receiptBody * { visibility: visible !important; }

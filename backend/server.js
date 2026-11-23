@@ -175,10 +175,41 @@ const SCHEMA = `
         key   TEXT PRIMARY KEY,
         value TEXT
     );
+    CREATE TABLE IF NOT EXISTS stock_counts (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        status       TEXT    NOT NULL DEFAULT 'open',      -- open → submitted → approved / rejected
+        note         TEXT,
+        user_id      INTEGER NOT NULL,
+        username     TEXT    NOT NULL,
+        created_at   TEXT    NOT NULL,
+        submitted_at TEXT,
+        reviewed_by  TEXT,
+        reviewed_at  TEXT,
+        review_note  TEXT
+    );
+    CREATE TABLE IF NOT EXISTS stock_count_lines (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        count_id   INTEGER NOT NULL,
+        part_id    INTEGER NOT NULL,
+        part_name  TEXT    NOT NULL,
+        expected   INTEGER NOT NULL,     -- what the app said when the part was counted
+        counted    INTEGER NOT NULL,
+        applied    INTEGER NOT NULL DEFAULT 0,
+        counted_at TEXT    NOT NULL,
+        UNIQUE (count_id, part_id)
+    );
+    CREATE TABLE IF NOT EXISTS op_refs (
+        ref        TEXT    PRIMARY KEY,          -- the device's own reference for an action sent from the app
+        kind       TEXT    NOT NULL,
+        user_id    INTEGER NOT NULL,
+        created_at TEXT    NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(sale_date);
     CREATE INDEX IF NOT EXISTS idx_items_sale ON sale_items(sale_id);
+    CREATE INDEX IF NOT EXISTS idx_count_lines ON stock_count_lines(count_id);
 `;
-const DATA_TABLES = ["parts", "users", "audit_log", "sessions", "sales", "sale_items", "day_close", "settings"];
+const DATA_TABLES = ["parts", "users", "audit_log", "sessions", "sales", "sale_items", "day_close", "settings",
+                     "stock_counts", "stock_count_lines", "op_refs"];
 
 async function migrate() {
     await client.executeMultiple(SCHEMA);
@@ -190,6 +221,13 @@ async function migrate() {
         await run("ALTER TABLE sales ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash'");
     if (!(await columnExists("users", "must_change_password")))
         await run("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
+    // Nov 2026: cancelled sales stay on record; a phone's own reference stops one sale being saved twice
+    if (!(await columnExists("sales", "status")))
+        await run("ALTER TABLE sales ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'");
+    for (const col of ["client_ref", "void_reason", "voided_by", "voided_at", "void_type", "sent_offline"])
+        if (!(await columnExists("sales", col)))
+            await run(`ALTER TABLE sales ADD COLUMN ${col} TEXT`);
+    await run("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_ref ON sales(client_ref) WHERE client_ref IS NOT NULL");
 
     // Hash any passwords still stored as plain text. Default ones must be changed at next login.
     for (const u of await query("SELECT id, password FROM users")) {
@@ -369,15 +407,22 @@ async function startServer() {
         const password = String(req.body?.password || "");
         const key = username.toLowerCase();
 
-        if (isLocked(key))
-            return res.status(429).json({ message: "Too many wrong attempts. Try again in 10 minutes." });
-
         const user = await get("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", [username]);
+        // Sign-in attempts go in the activity log. Unknown usernames are logged under user 0.
+        const who = user || { id: 0, username: username.slice(0, 30) || "(blank)" };
+
+        if (isLocked(key)) {
+            await writeAudit({ user: who, action: "LOGIN_BLOCKED", note: "Locked after 5 wrong passwords" });
+            return res.status(429).json({ message: "Too many wrong attempts. Try again in 10 minutes." });
+        }
         if (!user || !checkPassword(password, user.password)) {
             recordFail(key);
+            await writeAudit({ user: who, action: "LOGIN_FAILED",
+                               note: user ? "Wrong password" : "No account with this username" });
             return res.status(401).json({ message: "Invalid login details" });
         }
         failedLogins.delete(key);
+        await writeAudit({ user, action: "LOGIN", note: `Signed in as ${user.role === "admin" ? "owner" : "staff"}` });
 
         const token   = crypto.randomBytes(32).toString("hex");
         const expires = new Date(Date.now() + TZ_OFFSET_HOURS * 3600e3 + SESSION_DAYS * 86400e3)
@@ -391,7 +436,10 @@ async function startServer() {
 
     app.post("/api/users/logout", h(async (req, res) => {
         const user = await loadSession(req);
-        if (user) await run("DELETE FROM sessions WHERE token = ?", [user.token]);
+        if (user) {
+            await run("DELETE FROM sessions WHERE token = ?", [user.token]);
+            await writeAudit({ user, action: "LOGOUT", note: "Signed out" });
+        }
         res.json({ message: "Signed out" });
     }));
 
@@ -519,16 +567,34 @@ async function startServer() {
     }));
 
     // Anyone signed in can restock (add stock). Only admins can correct stock down.
+    // A restock sent from the app carries its own reference, so one sent twice (e.g. after being offline) is added once.
     app.post("/api/parts/:id/restock", requireAuth, h(async (req, res) => {
         const id   = toInt(req.params.id);
         const add  = toInt(req.body?.qty);
+        const ref  = String(req.body?.client_ref || "").trim();
+        const recordedAt = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(req.body?.recorded_at || "") ? req.body.recorded_at : null;
+        if (ref && !/^[A-Za-z0-9-]{8,64}$/.test(ref)) return res.status(400).json({ message: "Bad reference" });
         const part = await get("SELECT * FROM parts WHERE id = ?", [id]);
         if (!part) return res.status(404).json({ message: "Part not found" });
         if (!(add > 0) || add > 100000) return res.status(400).json({ message: "Enter a valid quantity" });
+        if (ref && await get("SELECT ref FROM op_refs WHERE ref = ?", [ref]))
+            return res.json({ ...(await partFor(req.user, id)), duplicate: true });
 
-        await run("UPDATE parts SET qty = qty + ? WHERE id = ?", [add, id]);
-        await writeAudit({ user: req.user, action: "RESTOCK", part, qtyBefore: part.qty, qtyAfter: part.qty + add,
-                           note: `Added ${add} to stock` });
+        const tx = await client.transaction("write");
+        try {
+            if (ref) await run("INSERT INTO op_refs (ref, kind, user_id, created_at) VALUES (?, 'restock', ?, ?)", [ref, req.user.id, localNow()], tx);
+            const now = (await get("SELECT qty FROM parts WHERE id = ?", [id], tx)).qty;
+            await run("UPDATE parts SET qty = qty + ? WHERE id = ?", [add, id], tx);
+            await writeAudit({ user: req.user, action: "RESTOCK", part, qtyBefore: now, qtyAfter: now + add,
+                               note: `Added ${add} to stock` + (recordedAt ? ` · recorded offline ${recordedAt.slice(5, 16)}` : "") }, tx);
+            await tx.commit();
+        } catch (e) {
+            try { await tx.rollback(); } catch (_) {}
+            if (ref && /UNIQUE|PRIMARY/i.test(e.message)) return res.json({ ...(await partFor(req.user, id)), duplicate: true });
+            throw e;
+        } finally {
+            try { tx.close(); } catch (_) {}
+        }
         res.json(await partFor(req.user, id));
     }));
 
@@ -577,6 +643,28 @@ async function startServer() {
         if (!items.length) return res.status(400).json({ message: "Add at least one item" });
         if (items.length > 50) return res.status(400).json({ message: "Too many lines on one sale" });
 
+        // The phone gives every sale its own reference. If the same sale arrives twice (a retry, a double tap,
+        // a sale sent again after the internet came back) the first one is returned and nothing is deducted twice.
+        const ref = String(req.body?.client_ref || "").trim();
+        if (ref && !/^[A-Za-z0-9-]{8,64}$/.test(ref)) return res.status(400).json({ message: "Bad sale reference" });
+        const isAdminUser = req.user.role === "admin";
+        const existing = async () => {
+            const s = ref && await get("SELECT id, user_id FROM sales WHERE client_ref = ?", [ref]);
+            return s && s.user_id === req.user.id ? saleWithItems(s.id, isAdminUser) : null;
+        };
+        const already = await existing();
+        if (already) return res.status(200).json({ ...already, duplicate: true });
+
+        // A sale recorded while the phone was offline keeps the time it really happened (up to 7 days back)
+        let when = localNow();
+        const recordedAt = String(req.body?.recorded_at || "");
+        const offline = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(recordedAt);
+        if (offline) {
+            if (recordedAt < shiftDate(localToday(), -7))
+                return res.status(400).json({ message: "This offline sale is over 7 days old. Tell the owner and record it again." });
+            if (recordedAt < when) when = recordedAt;      // a phone clock that runs ahead just gets "now"
+        }
+
         const wanted = new Map();
         for (const it of items) {
             const pid = toInt(it?.part_id), q = toInt(it?.qty);
@@ -595,7 +683,7 @@ async function startServer() {
                 lines.push({ part, qty: q });
             }
 
-            const now   = localNow();
+            const now   = when;
             const date  = now.slice(0, 10);
             const total = lines.reduce((s, l) => s + l.qty * l.part.price, 0);
             const cost  = lines.reduce((s, l) => s + l.qty * (l.part.cost || 0), 0);
@@ -606,9 +694,11 @@ async function startServer() {
             const receipt = prefix + String(last ? parseInt(last.receipt_no.slice(prefix.length), 10) + 1 : 1).padStart(4, "0");
 
             const { lastInsertRowid: saleId } = await run(
-                `INSERT INTO sales (receipt_no, customer, total, total_cost, item_count, user_id, username, sale_date, created_at, payment_method)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [receipt, customer, total, cost, count, req.user.id, req.user.username, date, now, method], tx);
+                `INSERT INTO sales (receipt_no, customer, total, total_cost, item_count, user_id, username, sale_date, created_at,
+                                    payment_method, client_ref, sent_offline)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [receipt, customer, total, cost, count, req.user.id, req.user.username, date, now, method,
+                 ref || null, offline ? localNow() : null], tx);
 
             for (const { part, qty } of lines) {
                 await run(`INSERT INTO sale_items (sale_id, part_id, part_name, sku, qty, unit_price, unit_cost, line_total)
@@ -616,12 +706,18 @@ async function startServer() {
                     [saleId, part.id, part.name, part.sku, qty, part.price, part.cost || 0, qty * part.price], tx);
                 await run("UPDATE parts SET qty = qty - ? WHERE id = ?", [qty, part.id], tx);
                 await writeAudit({ user: req.user, action: "SALE", part, qtyBefore: part.qty, qtyAfter: part.qty - qty,
-                                   note: `Sold ${qty} × ${money(part.price)} · receipt ${receiptNo(receipt)}` }, tx);
+                                   note: `Sold ${qty} × ${money(part.price)} · receipt ${receiptNo(receipt)}` +
+                                         (offline ? ` · recorded offline at ${now.slice(11, 16)}` : "") }, tx);
             }
             await tx.commit();
-            res.status(201).json(await saleWithItems(saleId, req.user.role === "admin"));
+            res.status(201).json(await saleWithItems(saleId, isAdminUser));
         } catch (e) {
             try { await tx.rollback(); } catch (_) {}
+            // Two copies of the same sale arrived at once: the other one won, so return it
+            if (ref && /UNIQUE/i.test(e.message)) {
+                const dup = await existing();
+                if (dup) return res.status(200).json({ ...dup, duplicate: true });
+            }
             console.error("Sale failed:", e.message);
             res.status(500).json({ message: "Sale could not be saved. Nothing was deducted." });
         } finally {
@@ -648,48 +744,130 @@ async function startServer() {
         res.json(sale);
     }));
 
+    // Owner cancels a sale (mistake) or takes the goods back (return). The sale is never deleted:
+    // it stays on record marked cancelled, the parts go back into stock, and the reason is logged.
+    app.post("/api/sales/:id/void", requireAdmin, h(async (req, res) => {
+        const id     = toInt(req.params.id);
+        const type   = req.body?.type === "return" ? "return" : "cancel";
+        const reason = String(req.body?.reason || "").trim().slice(0, 200);
+        if (!reason) return res.status(400).json({ message: "Say why (e.g. wrong part entered, customer returned it)" });
+
+        const tx = await client.transaction("write");
+        try {
+            const sale = await get("SELECT * FROM sales WHERE id = ?", [id], tx);
+            if (!sale) { await tx.rollback(); return res.status(404).json({ message: "Receipt not found" }); }
+            if (sale.status === "voided") { await tx.rollback(); return res.status(400).json({ message: "This sale was already cancelled" }); }
+
+            const items = await query("SELECT * FROM sale_items WHERE sale_id = ?", [id], tx);
+            const label = type === "return" ? "Returned" : "Cancelled";
+            for (const it of items) {
+                const part = it.part_id && await get("SELECT * FROM parts WHERE id = ?", [it.part_id], tx);
+                if (part) {
+                    await run("UPDATE parts SET qty = qty + ? WHERE id = ?", [it.qty, part.id], tx);
+                    await writeAudit({ user: req.user, action: "VOID_SALE", part, qtyBefore: part.qty, qtyAfter: part.qty + it.qty,
+                                       note: `${label} receipt ${receiptNo(sale.receipt_no)} (sold by ${sale.username}) · ${reason}` }, tx);
+                } else {
+                    await writeAudit({ user: req.user, action: "VOID_SALE", part: { id: null, name: it.part_name },
+                                       note: `${label} receipt ${receiptNo(sale.receipt_no)} · part no longer exists, stock not restored · ${reason}` }, tx);
+                }
+            }
+            await run(`UPDATE sales SET status = 'voided', void_type = ?, void_reason = ?, voided_by = ?, voided_at = ? WHERE id = ?`,
+                      [type, reason, req.user.username, localNow(), id], tx);
+            await tx.commit();
+            res.json(await saleWithItems(id, true));
+        } catch (e) {
+            try { await tx.rollback(); } catch (_) {}
+            console.error("Void failed:", e.message);
+            res.status(500).json({ message: "Couldn't cancel the sale. Nothing was changed." });
+        } finally {
+            try { tx.close(); } catch (_) {}
+        }
+    }));
+
     /* =========================
        REPORTS (admin)
     ========================= */
-    app.get("/api/reports/daily", requireAdmin, h(async (req, res) => {
-        const date = isDate(req.query.date) ? req.query.date : localToday();
-        const sum  = await get(`SELECT COUNT(*) AS sales, COALESCE(SUM(total),0) AS revenue,
-                                       COALESCE(SUM(total_cost),0) AS cost, COALESCE(SUM(item_count),0) AS items
-                                FROM sales WHERE sale_date = ?`, [date]);
-        const topParts = await query(`SELECT i.part_name, i.sku, SUM(i.qty) AS qty, SUM(i.line_total) AS revenue
+    // Sales figures for any run of days. Cancelled sales are left out of every total.
+    async function rangeSummary(from, to) {
+        const W = "s.sale_date BETWEEN ? AND ? AND s.status = 'completed'";
+        const p = [from, to];
+        const sum = await get(`SELECT COUNT(*) AS sales, COALESCE(SUM(total),0) AS revenue,
+                                      COALESCE(SUM(total_cost),0) AS cost, COALESCE(SUM(item_count),0) AS items
+                               FROM sales s WHERE ${W}`, p);
+        const topParts = await query(`SELECT i.part_id, i.part_name, i.sku, SUM(i.qty) AS qty, SUM(i.line_total) AS revenue
                                       FROM sale_items i JOIN sales s ON s.id = i.sale_id
-                                      WHERE s.sale_date = ? GROUP BY i.part_id, i.part_name
-                                      ORDER BY revenue DESC LIMIT 10`, [date]);
+                                      WHERE ${W} GROUP BY i.part_id, i.part_name
+                                      ORDER BY revenue DESC LIMIT 10`, p);
         const byStaff = await query(`SELECT username, COUNT(*) AS sales, SUM(total) AS revenue
-                                     FROM sales WHERE sale_date = ? GROUP BY user_id, username
-                                     ORDER BY revenue DESC`, [date]);
-
-        const rows = await query(`SELECT sale_date, SUM(total) AS revenue FROM sales
-                                  WHERE sale_date BETWEEN ? AND ? GROUP BY sale_date`, [shiftDate(date, -6), date]);
-        const last7 = [];
-        for (let i = 6; i >= 0; i--) {
-            const d = shiftDate(date, -i);
-            last7.push({ date: d, revenue: rows.find(r => r.sale_date === d)?.revenue || 0 });
-        }
-
+                                     FROM sales s WHERE ${W} GROUP BY user_id, username
+                                     ORDER BY revenue DESC`, p);
         const missingCost = (await get(`SELECT COUNT(*) AS c FROM sale_items i JOIN sales s ON s.id = i.sale_id
-                                        WHERE s.sale_date = ? AND i.unit_cost = 0`, [date])).c;
+                                        WHERE ${W} AND i.unit_cost = 0`, p)).c;
         // Profit only counts lines where a cost price was recorded, so a missing cost never inflates it
         const profit = (await get(`SELECT COALESCE(SUM(i.line_total - i.qty * i.unit_cost), 0) AS p
                                    FROM sale_items i JOIN sales s ON s.id = i.sale_id
-                                   WHERE s.sale_date = ? AND i.unit_cost > 0`, [date])).p;
-
+                                   WHERE ${W} AND i.unit_cost > 0`, p)).p;
         const byMethod = { cash: 0, pos: 0, transfer: 0 };
-        for (const r of await query("SELECT payment_method AS m, SUM(total) AS t FROM sales WHERE sale_date = ? GROUP BY payment_method", [date]))
+        for (const r of await query(`SELECT payment_method AS m, SUM(total) AS t FROM sales s WHERE ${W} GROUP BY payment_method`, p))
             byMethod[r.m] = r.t;
-        const close = await get("SELECT * FROM day_close WHERE close_date = ?", [date]);
+        const voided = await get(`SELECT COUNT(*) AS count, COALESCE(SUM(total),0) AS value FROM sales
+                                  WHERE sale_date BETWEEN ? AND ? AND status = 'voided'`, p);
+        const rows = await query(`SELECT sale_date, SUM(total) AS revenue, COUNT(*) AS sales FROM sales s
+                                  WHERE ${W} GROUP BY sale_date`, p);
+        return { sum, topParts, byStaff, missingCost, profit, byMethod, voided, rows };
+    }
+    function daySeries(from, to, rows) {
+        const out = [];
+        for (let d = from; d <= to; d = shiftDate(d, 1)) {
+            const r = rows.find(x => x.sale_date === d);
+            out.push({ date: d, revenue: r?.revenue || 0, sales: r?.sales || 0 });
+        }
+        return out;
+    }
 
+    app.get("/api/reports/daily", requireAdmin, h(async (req, res) => {
+        const date = isDate(req.query.date) ? req.query.date : localToday();
+        const r = await rangeSummary(date, date);
+        const week = await rangeSummary(shiftDate(date, -6), date);
+        const close = await get("SELECT * FROM day_close WHERE close_date = ?", [date]);
         res.json({
-            date, by_method: byMethod, close,
-            sales: sum.sales, items: sum.items,
-            revenue: sum.revenue, cost: sum.cost, profit,
-            missing_cost_lines: missingCost,
-            top_parts: topParts, by_staff: byStaff, last7
+            date, by_method: r.byMethod, close,
+            sales: r.sum.sales, items: r.sum.items,
+            revenue: r.sum.revenue, cost: r.sum.cost, profit: r.profit,
+            missing_cost_lines: r.missingCost, voided: r.voided,
+            top_parts: r.topParts, by_staff: r.byStaff,
+            last7: daySeries(shiftDate(date, -6), date, week.rows)
+        });
+    }));
+
+    // Weekly / monthly / any range: totals, day by day, best and slow-moving parts, staff, cancellations, stock corrections
+    app.get("/api/reports/period", requireAdmin, h(async (req, res) => {
+        const to   = isDate(req.query.to) ? req.query.to : localToday();
+        const from = isDate(req.query.from) ? req.query.from : shiftDate(to, -6);
+        if (from > to) return res.status(400).json({ message: "The start date is after the end date" });
+        if (shiftDate(from, 366) < to) return res.status(400).json({ message: "Pick a range of a year or less" });
+
+        const r = await rangeSummary(from, to);
+        // Slow movers: parts with stock on the shelf that sold nothing in this period (most money tied up first)
+        const slow = await query(`SELECT id, name, sku, qty, cost, price, qty * CASE WHEN cost > 0 THEN cost ELSE price END AS tied_up
+                                  FROM parts WHERE qty > 0 AND id NOT IN (
+                                      SELECT i.part_id FROM sale_items i JOIN sales s ON s.id = i.sale_id
+                                      WHERE s.sale_date BETWEEN ? AND ? AND s.status = 'completed' AND i.part_id IS NOT NULL)
+                                  ORDER BY tied_up DESC LIMIT 15`, [from, to]);
+        const corrections = await get(`SELECT COUNT(*) AS count, COALESCE(SUM(qty_change),0) AS units FROM audit_log
+                                       WHERE action = 'ADJUST' AND substr(created_at,1,10) BETWEEN ? AND ?`, [from, to]);
+        const stock = await get(`SELECT COUNT(*) AS parts, COALESCE(SUM(qty),0) AS units,
+                                        COALESCE(SUM(qty * cost),0) AS cost_value, COALESCE(SUM(qty * price),0) AS sell_value,
+                                        SUM(CASE WHEN qty <= min THEN 1 ELSE 0 END) AS low
+                                 FROM parts`);
+        const days = daySeries(from, to, r.rows);
+        res.json({
+            from, to, days,
+            sales: r.sum.sales, items: r.sum.items, revenue: r.sum.revenue, cost: r.sum.cost, profit: r.profit,
+            missing_cost_lines: r.missingCost, by_method: r.byMethod, voided: r.voided,
+            top_parts: r.topParts, by_staff: r.byStaff, slow_parts: slow,
+            corrections, stock,
+            best_day: days.reduce((b, d) => (d.revenue > (b?.revenue || 0) ? d : b), null)
         });
     }));
 
@@ -712,6 +890,135 @@ async function startServer() {
         await writeAudit({ user: req.user, action: "DAY_CLOSE",
                            note: `${before ? "Updated" : "Saved"} for ${niceDate(date)}: cash ${money(cash)}, POS ${money(pos)}, transfer ${money(transfer)}` });
         res.json(await get("SELECT * FROM day_close WHERE close_date = ?", [date]));
+    }));
+
+    /* =========================
+       STOCK COUNTS
+       Staff count what is on the shelf; the owner reviews each difference and decides what to correct.
+       A difference is something to look into, not proof that anyone took anything.
+    ========================= */
+    async function countWithLines(id) {
+        const c = await get("SELECT * FROM stock_counts WHERE id = ?", [id]);
+        if (!c) return null;
+        c.lines = await query(`SELECT l.*, p.qty AS current_qty, p.sku FROM stock_count_lines l
+                               LEFT JOIN parts p ON p.id = l.part_id WHERE l.count_id = ? ORDER BY l.part_name`, [id]);
+        c.lines.forEach(l => l.difference = l.counted - l.expected);
+        return c;
+    }
+    const canSeeCount = (user, c) => c && (user.role === "admin" || c.user_id === user.id);
+
+    app.get("/api/counts", requireAuth, h(async (req, res) => {
+        const sql = `SELECT c.*, (SELECT COUNT(*) FROM stock_count_lines l WHERE l.count_id = c.id) AS lines,
+                            (SELECT COUNT(*) FROM stock_count_lines l WHERE l.count_id = c.id AND l.counted != l.expected) AS differences
+                     FROM stock_counts c`;
+        res.json(req.user.role === "admin"
+            ? await query(`${sql} ORDER BY CASE c.status WHEN 'submitted' THEN 0 WHEN 'open' THEN 1 ELSE 2 END, c.id DESC LIMIT 50`)
+            : await query(`${sql} WHERE c.user_id = ? ORDER BY c.id DESC LIMIT 20`, [req.user.id]));
+    }));
+
+    app.post("/api/counts", requireAuth, h(async (req, res) => {
+        const open = await get("SELECT id FROM stock_counts WHERE user_id = ? AND status = 'open'", [req.user.id]);
+        if (open) return res.json(await countWithLines(open.id));       // carry on with the count already started
+        const note = String(req.body?.note || "").trim().slice(0, 120) || null;
+        const r = await run("INSERT INTO stock_counts (note, user_id, username, created_at) VALUES (?, ?, ?, ?)",
+                            [note, req.user.id, req.user.username, localNow()]);
+        await writeAudit({ user: req.user, action: "COUNT_START", note: `Stock count #${r.lastInsertRowid} started${note ? " · " + note : ""}` });
+        res.status(201).json(await countWithLines(r.lastInsertRowid));
+    }));
+
+    app.get("/api/counts/:id", requireAuth, h(async (req, res) => {
+        const c = await countWithLines(toInt(req.params.id));
+        if (!canSeeCount(req.user, c)) return res.status(404).json({ message: "Count not found" });
+        res.json(c);
+    }));
+
+    // Record (or change) how many of one part were counted. counted = null removes the line.
+    app.put("/api/counts/:id/lines", requireAuth, h(async (req, res) => {
+        const c = await get("SELECT * FROM stock_counts WHERE id = ?", [toInt(req.params.id)]);
+        if (!c || c.user_id !== req.user.id) return res.status(404).json({ message: "Count not found" });
+        if (c.status !== "open") return res.status(400).json({ message: "This count has already been sent for review" });
+        const part = await get("SELECT * FROM parts WHERE id = ?", [toInt(req.body?.part_id)]);
+        if (!part) return res.status(404).json({ message: "Part not found" });
+        if (req.body?.counted === null) {
+            await run("DELETE FROM stock_count_lines WHERE count_id = ? AND part_id = ?", [c.id, part.id]);
+            return res.json(await countWithLines(c.id));
+        }
+        const counted = toInt(req.body?.counted);
+        if (!(counted >= 0) || counted > 1000000) return res.status(400).json({ message: "Enter how many you counted (0 or more)" });
+        // "expected" is what the app showed at the moment this part was counted
+        await run(`INSERT INTO stock_count_lines (count_id, part_id, part_name, expected, counted, counted_at) VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(count_id, part_id) DO UPDATE SET counted = excluded.counted, counted_at = excluded.counted_at`,
+                   [c.id, part.id, part.name, part.qty, counted, localNow()]);
+        res.json(await countWithLines(c.id));
+    }));
+
+    app.post("/api/counts/:id/submit", requireAuth, h(async (req, res) => {
+        const c = await countWithLines(toInt(req.params.id));
+        if (!c || c.user_id !== req.user.id) return res.status(404).json({ message: "Count not found" });
+        if (c.status !== "open") return res.status(400).json({ message: "Already sent" });
+        if (!c.lines.length) return res.status(400).json({ message: "Count at least one part first" });
+        await run("UPDATE stock_counts SET status = 'submitted', submitted_at = ? WHERE id = ?", [localNow(), c.id]);
+        const diffs = c.lines.filter(l => l.difference !== 0).length;
+        await writeAudit({ user: req.user, action: "COUNT_SUBMIT",
+                           note: `Stock count #${c.id}: ${c.lines.length} part(s) counted, ${diffs} with a difference` });
+        res.json(await countWithLines(c.id));
+    }));
+
+    // Owner: apply the chosen corrections. Each correction moves stock by the difference found at count time,
+    // so sales made after the count are not undone.
+    app.post("/api/counts/:id/approve", requireAdmin, h(async (req, res) => {
+        const id     = toInt(req.params.id);
+        const reason = String(req.body?.reason || "").trim().slice(0, 200);
+        const apply  = new Set((Array.isArray(req.body?.part_ids) ? req.body.part_ids : []).map(toInt));
+        if (!reason) return res.status(400).json({ message: "Add a note on what you found (e.g. recounted, 2 damaged)" });
+
+        const tx = await client.transaction("write");
+        try {
+            const c = await get("SELECT * FROM stock_counts WHERE id = ?", [id], tx);
+            if (!c) { await tx.rollback(); return res.status(404).json({ message: "Count not found" }); }
+            if (c.status !== "submitted" && !(c.status === "open" && c.user_id === req.user.id)) {
+                await tx.rollback(); return res.status(400).json({ message: "Only a count that has been sent can be approved" });
+            }
+            const lines = await query("SELECT * FROM stock_count_lines WHERE count_id = ?", [id], tx);
+            let changed = 0;
+            for (const l of lines) {
+                const diff = l.counted - l.expected;
+                if (!diff || !apply.has(l.part_id)) continue;
+                const part = await get("SELECT * FROM parts WHERE id = ?", [l.part_id], tx);
+                if (!part) continue;
+                const newQty = Math.max(0, part.qty + diff);
+                await run("UPDATE parts SET qty = ? WHERE id = ?", [newQty, part.id], tx);
+                await run("UPDATE stock_count_lines SET applied = 1 WHERE id = ?", [l.id], tx);
+                await writeAudit({ user: req.user, action: "ADJUST", part, qtyBefore: part.qty, qtyAfter: newQty,
+                                   note: `Stock count #${id} by ${c.username}: counted ${l.counted}, app said ${l.expected} · ${reason}` }, tx);
+                changed++;
+            }
+            await run("UPDATE stock_counts SET status = 'approved', reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE id = ?",
+                      [req.user.username, localNow(), reason, id], tx);
+            await writeAudit({ user: req.user, action: "COUNT_APPROVE",
+                               note: `Stock count #${id}: ${changed} correction(s) made · ${reason}` }, tx);
+            await tx.commit();
+            res.json(await countWithLines(id));
+        } catch (e) {
+            try { await tx.rollback(); } catch (_) {}
+            console.error("Count approval failed:", e.message);
+            res.status(500).json({ message: "Couldn't save the corrections. Nothing was changed." });
+        } finally {
+            try { tx.close(); } catch (_) {}
+        }
+    }));
+
+    app.post("/api/counts/:id/reject", requireAdmin, h(async (req, res) => {
+        const id = toInt(req.params.id);
+        const reason = String(req.body?.reason || "").trim().slice(0, 200);
+        if (!reason) return res.status(400).json({ message: "Say why (e.g. count again tomorrow)" });
+        const c = await get("SELECT * FROM stock_counts WHERE id = ?", [id]);
+        if (!c) return res.status(404).json({ message: "Count not found" });
+        if (c.status === "approved" || c.status === "rejected") return res.status(400).json({ message: "This count has already been reviewed" });
+        await run("UPDATE stock_counts SET status = 'rejected', reviewed_by = ?, reviewed_at = ?, review_note = ? WHERE id = ?",
+                  [req.user.username, localNow(), reason, id]);
+        await writeAudit({ user: req.user, action: "COUNT_REJECT", note: `Stock count #${id} set aside, no stock changed · ${reason}` });
+        res.json(await countWithLines(id));
     }));
 
     /* =========================

@@ -1,4 +1,16 @@
-# SpareParts Pro — where things stand (22 Oct 2026)
+# SpareParts Pro — where things stand (23 Nov 2026)
+
+## New on 23 Nov 2026 (from the SRS v1.2 document pack) — NOT LIVE until pushed to GitHub
+- Sign-ins recorded · cancel/return a sale with a reason · sales can't be saved twice
+- Stock Count screen with owner review of differences
+- Weekly and monthly reports (incl. parts not selling)
+- Sales keep working without internet and send themselves later
+- Details: CHANGES.md (bottom section). Old version kept in _backup_2026-11-23.
+- To go live: push this folder to GitHub (main) → Render updates itself. The database upgrades itself on first start.
+- After it's live, try: one sale, cancel it, run a small stock count, open Reports → Week.
+- NEW: Windows + Android apps — test copy of the Windows app is in Downloads\SpareParts_Pro_Document_Pack_2026-11-17.
+  After pushing, GitHub → Actions → Build apps gives the installer and the Android .apk. Steps: APPS.md
+
 
 ## Live now
 - App: https://spareparts-api-4343.onrender.com (Render free plan)
@@ -39,5 +51,9 @@ Test for 2 weeks; ask: what confused you, what was missing, would you pay ₦X a
   (card, bank transfer incl. OPay/PalmPay users, USSD, international cards; Stripe directly needs a foreign company)
 - Optional: split "Paid by" into Cash / POS / OPay / PalmPay / Bank transfer for the end-of-day check
 - Thermal label printer layout once you buy one
+
+## Next from the SRS (decide after testers)
+- Release 4/5: receiving-stock sessions with review, guided tutorials with voice, practice mode, French/Igbo
+- Release 6: product fields and units for bearings / plastics / electrical shops
 
 Details: DEPLOY.md (hosting steps), CHANGES.md (everything that changed).

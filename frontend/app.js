@@ -25,14 +25,24 @@ const state = {
     labelCopies: {}        // part_id -> labels to print
 };
 
-const BASE = (() => {
-    const h = window.location.hostname;
+/* Where the shop's data lives.
+   - Website: the same server that served the page.
+   - Installed app (Windows / Android): the app's files are on the device, the data is on the shop's
+     online server. Each shop (e.g. a tester's own copy) can point the app at its own server. */
+const DEFAULT_SERVER = "https://spareparts-api-4343.onrender.com";
+const IN_APP = location.protocol === "app:" || location.protocol === "file:" || !!window.Capacitor ||
+               (location.protocol === "https:" && location.hostname === "localhost" && !location.port);   // Android app
+function serverUrl() {
+    return (load("sp_server") || DEFAULT_SERVER).trim().replace(/\/+$/, "");
+}
+function apiBase() {
+    if (IN_APP) return serverUrl() + "/api";
+    const h = location.hostname;
     const local = h === "localhost" || h === "127.0.0.1";
-    if (window.location.protocol === "file:" || (local && window.location.port !== "5000"))
-        return "http://localhost:5000/api";
-    if (local || h.endsWith("onrender.com")) return "/api";   // app served by the API server itself
-    return "https://spareparts-api-4343.onrender.com/api";
-})();
+    if (local && location.port !== "5000") return "http://localhost:5000/api";
+    if (local || h.endsWith("onrender.com")) return "/api";   // page served by the API server itself
+    return DEFAULT_SERVER + "/api";
+}
 
 const $ = id => document.getElementById(id);
 const isAdmin = () => state.user?.role === "admin";
@@ -133,10 +143,13 @@ async function apiFetch(path, options = {}) {
     if (state.token) headers.Authorization = `Bearer ${state.token}`;
     let res;
     try {
-        res = await fetch(`${BASE}${path}`, { ...options, headers });
+        res = await fetch(`${apiBase()}${path}`, { ...options, headers });
     } catch (_) {
-        throw new Error("Can't reach the server. Check your internet connection.");
+        throw Object.assign(new Error("Can't reach the server. Check your internet connection."), { offline: true });
     }
+    // 503 from the app's offline helper (sw.js), or the host waking up / down
+    if (res.status === 503 || res.status === 502 || res.status === 504)
+        throw Object.assign(new Error("Can't reach the server right now. Check your internet connection."), { offline: true });
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 && path !== "/users/login") {
         signOutLocal("Your session ended. Please sign in again.");
@@ -211,6 +224,7 @@ function showLoginError(msg) {
 
 async function enterApp(user) {
     state.user = user;
+    store("sp_user", JSON.stringify(user));
     $("userDisplayName").textContent = user.username;
     $("userAvatar").textContent = user.username.charAt(0).toUpperCase();
     const chip = $("userRoleBadge");
@@ -235,7 +249,10 @@ async function resumeSession() {
     state.token = saved;
     try {
         await enterApp(await apiFetch("/users/me"));
-    } catch (_) {
+    } catch (err) {
+        // No internet: stay signed in with what this phone knew last time (the server still checks every action later)
+        const cachedUser = (() => { try { return JSON.parse(load("sp_user") || "null"); } catch (_) { return null; } })();
+        if (err.offline && cachedUser && !cachedUser.must_change_password) { await enterApp(cachedUser); return; }
         state.token = null;
         store("sp_token", null);
     }
@@ -251,13 +268,56 @@ function signOutLocal(msg) {
 }
 
 async function logout() {
+    const waiting = getPending().length;
+    if (waiting && !confirm(`${count(waiting, "thing")} recorded on this phone haven't reached the shop records yet. They'll be sent next time you sign in here. Sign out anyway?`)) return;
     try { await apiFetch("/users/logout", { method: "POST" }); } catch (_) {}
+    store("sp_user", null);
     signOutLocal();
     location.reload();
 }
 
+/* Installed app: choose the shop's server (each tester's shop has its own) */
+function showServerBox() {
+    if (!IN_APP) return;
+    $("serverBox").hidden = false;
+    $("serverName").textContent = serverUrl().replace(/^https?:\/\//, "");
+}
+function toggleServerForm(open) {
+    $("serverForm").hidden = !open;
+    if (open) { $("serverInput").value = serverUrl(); $("serverMsg").textContent = "The owner gives you this address. Each shop has its own."; $("serverInput").focus(); }
+}
+function useDefaultServer() { $("serverInput").value = DEFAULT_SERVER; saveServer(); }
+async function saveServer() {
+    let url = $("serverInput").value.trim().replace(/\/+$/, "");
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+    const btn = $("serverSaveBtn"), msg = $("serverMsg");
+    btn.disabled = true; msg.textContent = "Checking… (a sleeping server can take up to a minute to wake)";
+    try {
+        const ctl = new AbortController(); setTimeout(() => ctl.abort(), 75000);
+        const res = await fetch(url + "/api/health", { signal: ctl.signal });
+        const data = await res.json();
+        if (!data.ok) throw new Error();
+    } catch (_) {
+        msg.textContent = "Couldn't reach a SpareParts server at that address. Check it and your internet.";
+        btn.disabled = false;
+        return;
+    }
+    btn.disabled = false;
+    if (url === serverUrl()) { toggleServerForm(false); return; }
+    // A different shop: forget this device's sign-in and saved stock list from the old one
+    store("sp_server", url === DEFAULT_SERVER ? null : url);
+    ["sp_token", "sp_user", "sp_parts_cache"].forEach(k => store(k, null));
+    state.shop = { name: "", address: "", phone: "", receipt_note: "" };
+    toggleServerForm(false);
+    showServerBox();
+    loadShopName();
+    toast("Server saved. Sign in with your account for this shop.", "success");
+}
+
 document.addEventListener("DOMContentLoaded", () => {
     ["loginUser", "loginPass"].forEach(id => $(id).addEventListener("keydown", e => { if (e.key === "Enter") handleLogin(); }));
+    showServerBox();
     applyThemeLabel();
     loadShopName();
     resumeSession();
@@ -321,6 +381,7 @@ function openMoreSheet() {
             <div class="avatar">${esc(state.user.username.charAt(0).toUpperCase())}</div>
             <div><strong>${esc(state.user.username)}</strong><span class="role-chip ${isAdmin() ? "admin" : ""}">${isAdmin() ? "Owner" : "Staff"}</span></div>
         </div>
+        ${item("fa-clipboard-check", "Stock count", "showSection('counts')")}
         ${isAdmin() ? item("fa-barcode", "Barcode labels", "showSection('labels')") : ""}
         ${isAdmin() ? item("fa-clock-rotate-left", "Activity log", "showSection('audit')") : ""}
         ${isAdmin() ? item("fa-gear", "Settings, staff & backups", "showSection('users')") : ""}
@@ -337,10 +398,11 @@ function showSection(id) {
     if (id === "dashboard") renderDashboard(true);
     if (id === "sales")     loadSalesHistory();
     if (id === "reports")   loadReport();
+    if (id === "counts")    loadCounts();
     if (id === "labels")    renderLabelPicker();
     if (id === "audit")     loadAuditLog();
     if (id === "users")     { loadUsers(); checkStorage(); fillShopForm(); }
-    if (id !== "sales")     stopScanner();
+    if (id !== "sales" && id !== "counts") stopScanner();
     window.scrollTo(0, 0);
 }
 
@@ -349,7 +411,12 @@ function showSection(id) {
 ------------------------------------------------------------------ */
 async function initApp() {
     await Promise.all([fetchParts(), fetchShop()]);
-    if (isAdmin()) checkStorage();
+    renderPending();
+    syncPending();
+    if (isAdmin()) {
+        checkStorage().catch(() => {});
+        apiFetch("/counts").then(updateCountBadge).catch(() => {});   // counts waiting for the owner
+    }
 }
 
 async function fetchShop() {
@@ -360,9 +427,16 @@ async function fetchShop() {
 async function fetchParts() {
     try {
         state.parts = await apiFetch("/parts");
+        applyPendingToParts(state.parts);       // sales / restocks made offline that the server hasn't had yet
+        store("sp_parts_cache", JSON.stringify(state.parts));
         renderAll();
     } catch (err) {
-        toast(err.message || "Couldn't load your stock", "error");
+        // Offline: use the last stock list this phone saw, so selling can carry on
+        const cached = load("sp_parts_cache");
+        if (err.offline && cached) {
+            try { state.parts = JSON.parse(cached); renderAll(); } catch (_) {}
+            toast("No internet — showing the stock list from your last connection", "info");
+        } else toast(err.message || "Couldn't load your stock", "error");
     }
 }
 
@@ -448,26 +522,32 @@ async function loadTodaySummary() {
     const list = $("activityList");
     try {
         const { sales } = await apiFetch(`/sales?date=${todayLocal()}`);
-        const total = sales.reduce((s, x) => s + x.total, 0);
-        $("todayHeading").innerHTML = `${isAdmin() ? "Today's sales" : "Your sales today"} <span class="muted">${count(sales.length, "sale")} · ${naira(total)}</span>`;
+        const kept = sales.filter(isLive);
+        const total = kept.reduce((s, x) => s + x.total, 0);
+        $("todayHeading").innerHTML = `${isAdmin() ? "Today's sales" : "Your sales today"} <span class="muted">${count(kept.length, "sale")} · ${naira(total)}</span>`;
         list.innerHTML = sales.length ? sales.slice(0, 8).map(saleRow).join("")
             : `<div class="empty" style="border:0;"><i class="fa-solid fa-receipt"></i>No sales yet today.</div>`;
-    } catch (_) {
-        list.innerHTML = `<div class="empty" style="border:0;">Couldn't load today's sales.</div>`;
+    } catch (err) {
+        list.innerHTML = `<div class="empty" style="border:0;">${err.offline
+            ? "No internet — today's sales will show when you're back online. You can still sell."
+            : "Couldn't load today's sales."}</div>`;
     }
 }
 
 function saleRow(s) {
     return `
-        <div class="list-row clickable" onclick="viewReceipt(${s.id})">
+        <div class="list-row clickable ${isLive(s) ? "" : "voided"}" onclick="viewReceipt(${s.id})">
             <div class="list-icon"><i class="fa-solid ${PAY_ICONS[s.payment_method] || "fa-receipt"}"></i></div>
             <div class="list-main">
-                <strong>${esc(s.customer || "Walk-in customer")}</strong>
+                <strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}
                 <div class="muted">${receiptShort(s.receipt_no)} · ${count(s.item_count, "item")} · ${esc(PAY_LABELS[s.payment_method] || "Cash")}${isAdmin() ? " · " + esc(s.username) : ""}</div>
             </div>
             <div class="list-end"><strong>${naira(s.total)}</strong><span class="muted small">${fmtTime(s.created_at)}</span></div>
         </div>`;
 }
+// Cancelled / returned sales stay on record but don't count in any total
+const isLive = s => s.status !== "voided";
+const voidChip = s => isLive(s) ? "" : `<span class="pill out small-pill">${s.void_type === "return" ? "Returned" : "Cancelled"}</span>`;
 
 /* ------------------------------------------------------------------
    STOCK
@@ -532,12 +612,18 @@ async function confirmRestock() {
     if (!(qty > 0)) return toast("Enter how many arrived", "error");
     const p = state.parts.find(x => x.id === state.restockTargetId);
     if (!p) return;
+    const ref = newRef();
     try {
-        await apiFetch(`/parts/${p.id}/restock`, { method: "POST", body: JSON.stringify({ qty }) });
+        await apiFetch(`/parts/${p.id}/restock`, { method: "POST", body: JSON.stringify({ qty, client_ref: ref }) });
         toast(`Added ${qty} × ${p.name}`, "success");
         closeModal("restockModal");
         await fetchParts();
-    } catch (err) { toast(err.message, "error"); }
+    } catch (err) {
+        if (!err.offline) return toast(err.message, "error");
+        queueOfflineRestock(p, qty);
+        closeModal("restockModal");
+        toast(`No internet — ${qty} × ${p.name} added on this phone. It will be sent automatically.`, "info");
+    }
 }
 
 /* Add part -------------------------------------------------------- */
@@ -715,21 +801,29 @@ async function completeSale() {
     if (!state.payMethod) return toast("Choose how the customer paid: Cash, POS or Transfer", "error");
     const btn = $("completeSaleBtn");
     btn.disabled = true; btn.classList.add("loading");
+    // One reference per sale: if the same sale is sent twice, the server saves it once
+    const body = {
+        items: state.cart.map(c => ({ ...c })), customer: $("saleCustomer").value.trim(),
+        payment_method: state.payMethod, client_ref: newRef()
+    };
+    const clearSale = () => { state.cart = []; $("saleCustomer").value = ""; setPayMethod(null); renderCart(); };
     try {
-        const sale = await apiFetch("/sales", {
-            method: "POST",
-            body: JSON.stringify({ items: state.cart, customer: $("saleCustomer").value.trim(), payment_method: state.payMethod })
-        });
-        state.cart = [];
-        $("saleCustomer").value = "";
-        setPayMethod(null);
+        const sale = await apiFetch("/sales", { method: "POST", body: JSON.stringify(body) });
+        clearSale();
         toast(`Sale saved — ${naira(sale.total)}`, "success");
         await fetchParts();
         loadSalesHistory();
         showReceipt(sale);
     } catch (err) {
-        toast(err.message || "The sale didn't save — try again", "error");
-        await fetchParts();
+        if (err.offline) {
+            // No internet: keep the sale on this phone and send it as soon as the connection is back
+            queueOfflineSale(body);
+            clearSale();
+            toast("No internet — sale kept on this phone. It will be sent automatically.", "info");
+        } else {
+            toast(err.message || "The sale didn't save — try again", "error");
+            await fetchParts();
+        }
     } finally {
         btn.classList.remove("loading");
         btn.disabled = !state.cart.length;
@@ -743,11 +837,14 @@ async function loadSalesHistory() {
     const tbody = $("salesHistoryBody");
     try {
         const { sales } = await apiFetch(`/sales?date=${dateEl.value}`);
-        const total = sales.reduce((s, x) => s + x.total, 0);
-        $("historySummary").textContent = `${dayName(dateEl.value)} · ${count(sales.length, "sale")} · ${naira(total)}`;
+        const kept = sales.filter(isLive);
+        const total = kept.reduce((s, x) => s + x.total, 0);
+        const voided = sales.length - kept.length;
+        $("historySummary").textContent = `${dayName(dateEl.value)} · ${count(kept.length, "sale")} · ${naira(total)}` +
+            (voided ? ` · ${voided} cancelled` : "");
         tbody.innerHTML = sales.length ? sales.map(s => `
-            <tr class="clickable" onclick="viewReceipt(${s.id})">
-                <td class="card-title"><strong>${esc(s.customer || "Walk-in customer")}</strong><div class="muted small">${receiptShort(s.receipt_no)}</div></td>
+            <tr class="clickable ${isLive(s) ? "" : "voided"}" onclick="viewReceipt(${s.id})">
+                <td class="card-title"><strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}<div class="muted small">${receiptShort(s.receipt_no)}${s.sent_offline ? " · recorded offline" : ""}</div></td>
                 <td data-label="Time">${fmtTime(s.created_at)}</td>
                 <td data-label="Paid by">${esc(PAY_LABELS[s.payment_method] || "Cash")}</td>
                 <td data-label="Served by">${esc(s.username)}</td>
@@ -755,9 +852,157 @@ async function loadSalesHistory() {
             </tr>`).join("")
             : `<tr><td class="empty-cell" colspan="5">No sales ${dayDiff(dateEl.value) === 0 ? "yet today" : "on this day"}.</td></tr>`;
     } catch (err) {
-        tbody.innerHTML = `<tr><td class="empty-cell c-out" colspan="5">${esc(err.message)}</td></tr>`;
+        tbody.innerHTML = `<tr><td class="empty-cell ${err.offline ? "" : "c-out"}" colspan="5">${esc(err.offline
+            ? "No internet — the sales list will show when you're back online. You can still sell." : err.message)}</td></tr>`;
     }
 }
+
+/* ------------------------------------------------------------------
+   OFFLINE SALES — kept on this phone, sent when the internet is back.
+   Each has its own reference, so sending one twice never records it twice.
+------------------------------------------------------------------ */
+function newRef() {
+    if (window.crypto?.randomUUID) return crypto.randomUUID();
+    return "s" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 12);
+}
+function localStamp(d = new Date()) {
+    const p = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+// Kept per person (and per shop server in the installed app), so nothing is ever sent to the wrong account or shop
+const pendingKey = () => `sp_pending_${IN_APP ? new URL(serverUrl()).host + "_" : ""}${(state.user?.username || "").toLowerCase()}`;
+function getPending() {
+    try { return JSON.parse(load(pendingKey()) || "[]"); } catch (_) { return []; }
+}
+function setPending(list) { store(pendingKey(), list.length ? JSON.stringify(list) : null); renderPending(); }
+
+// Every action kept offline: { kind: "sale" | "restock" | "count", status: "pending" | "failed", ... }
+const kindOf = op => op.kind || "sale";
+
+function queueOfflineSale(body) {
+    const lines = body.items.map(c => {
+        const p = state.parts.find(x => x.id === c.part_id);
+        return { ...c, name: p?.name || "Part", price: p?.price || 0 };
+    });
+    setPending([...getPending(), {
+        kind: "sale", ...body, recorded_at: localStamp(), status: "pending",
+        lines, total: lines.reduce((s, l) => s + l.qty * l.price, 0)
+    }]);
+    // Show the stock as already taken, so the same item isn't sold twice while offline
+    for (const l of lines) { const p = state.parts.find(x => x.id === l.part_id); if (p) p.qty -= l.qty; }
+    afterLocalChange();
+}
+
+function queueOfflineRestock(part, qty) {
+    setPending([...getPending(), { kind: "restock", client_ref: newRef(), part_id: part.id, name: part.name,
+                                   qty, recorded_at: localStamp(), status: "pending" }]);
+    part.qty += qty;
+    afterLocalChange();
+}
+
+// A counted number replaces any earlier unsent number for the same part in the same count
+function queueOfflineCount(countId, part, counted) {
+    const list = getPending().filter(o => !(kindOf(o) === "count" && o.count_id === countId && o.part_id === part.id && o.status === "pending"));
+    list.push({ kind: "count", client_ref: newRef(), count_id: countId, part_id: part.id, name: part.name,
+                counted, recorded_at: localStamp(), status: "pending" });
+    setPending(list);
+}
+
+function afterLocalChange() {
+    store("sp_parts_cache", JSON.stringify(state.parts));
+    renderAll();
+}
+
+// What the server doesn't know yet, applied on top of the stock list it sends
+function applyPendingToParts(parts) {
+    for (const op of getPending()) {
+        if (kindOf(op) === "sale") for (const l of op.lines || []) {
+            const p = parts.find(x => x.id === l.part_id); if (p) p.qty -= l.qty;
+        }
+        if (kindOf(op) === "restock" && op.status === "pending") {
+            const p = parts.find(x => x.id === op.part_id); if (p) p.qty += op.qty;
+        }
+    }
+}
+
+let syncing = false;
+async function syncPending() {
+    if (syncing || !state.token || !state.user) return;
+    const list = getPending();
+    if (!list.some(s => s.status === "pending")) return;
+    syncing = true;
+    const sent = { sale: 0, restock: 0, count: 0 };
+    try {
+        for (const op of list) {                         // oldest first, so things arrive in the order they happened
+            if (op.status !== "pending") continue;
+            const k = kindOf(op);
+            try {
+                if (k === "sale")
+                    await apiFetch("/sales", { method: "POST", body: JSON.stringify({
+                        items: op.items, customer: op.customer, payment_method: op.payment_method,
+                        client_ref: op.client_ref, recorded_at: op.recorded_at }) });
+                else if (k === "restock")
+                    await apiFetch(`/parts/${op.part_id}/restock`, { method: "POST", body: JSON.stringify({
+                        qty: op.qty, client_ref: op.client_ref, recorded_at: op.recorded_at }) });
+                else if (k === "count") {
+                    const c = await apiFetch(`/counts/${op.count_id}/lines`, { method: "PUT",
+                        body: JSON.stringify({ part_id: op.part_id, counted: op.counted }) });
+                    if (state.count?.id === c.id) state.count = c;
+                }
+                op.status = "sent"; sent[k]++;
+            } catch (err) {
+                if (err.offline) break;                 // still no internet — try again later
+                op.status = "failed"; op.error = err.message;
+            }
+        }
+    } finally {
+        setPending(list.filter(s => s.status !== "sent"));
+        syncing = false;
+    }
+    const parts = [sent.sale && count(sent.sale, "sale"), sent.restock && count(sent.restock, "restock"),
+                   sent.count && count(sent.count, "counted part")].filter(Boolean);
+    if (parts.length) {
+        toast(`Back online — ${parts.join(", ")} sent`, "success");
+        await fetchParts();
+        if ($("sales").classList.contains("active")) loadSalesHistory();
+        if ($("dashboard").classList.contains("active")) loadTodaySummary();
+        if ($("counts").classList.contains("active")) loadCounts();
+    }
+}
+
+function dismissFailedSale(ref) {
+    if (!confirm("Remove this from the phone? Make sure the owner knows about it first.")) return;
+    setPending(getPending().filter(s => s.client_ref !== ref));
+    fetchParts();
+}
+
+function renderPending() {
+    const list = state.user ? getPending() : [];
+    const waiting = list.filter(s => s.status === "pending");
+    const failed  = list.filter(s => s.status === "failed");
+    const sales = waiting.filter(o => kindOf(o) === "sale"), restocks = waiting.filter(o => kindOf(o) === "restock"),
+          counts = waiting.filter(o => kindOf(o) === "count");
+    const what = [
+        sales.length && `${count(sales.length, "sale")} (${naira(sales.reduce((t, s) => t + s.total, 0))})`,
+        restocks.length && count(restocks.length, "restock"),
+        counts.length && count(counts.length, "counted part")
+    ].filter(Boolean).join(", ");
+    const describe = o => kindOf(o) === "sale"
+        ? `sale of ${naira(o.total)}: ${o.lines.map(l => `${l.name} × ${l.qty}`).join(", ")}`
+        : kindOf(o) === "restock" ? `${o.qty} × ${o.name} added to stock` : `count of ${o.name} (${o.counted})`;
+    const html = !list.length ? "" : `
+        ${waiting.length ? `<div class="notice warn pending-note"><i class="fa-solid fa-cloud-arrow-up"></i>
+            <div><strong>${what} waiting to be sent.</strong>
+            Recorded without internet — they'll be sent automatically when the connection is back.</div>
+            <button class="btn btn-soft btn-sm" onclick="syncPending()"><i class="fa-solid fa-rotate"></i> Send now</button></div>` : ""}
+        ${failed.map(s => `<div class="notice alert pending-note"><i class="fa-solid fa-triangle-exclamation"></i>
+            <div><strong>Something recorded offline couldn't be saved</strong> (${esc(fmtWhen(s.recorded_at))}, ${esc(describe(s))}).<br>
+            Reason: ${esc(s.error)}. Tell the owner so the stock can be checked.</div>
+            <button class="btn btn-ghost btn-sm" onclick="dismissFailedSale('${esc(s.client_ref)}')">Remove</button></div>`).join("")}`;
+    document.querySelectorAll(".pending-box").forEach(el => el.innerHTML = html);
+}
+window.addEventListener("online", () => syncPending());
+setInterval(() => { if (navigator.onLine !== false) syncPending(); }, 30000);
 
 /* ------------------------------------------------------------------
    RECEIPTS — carry the shop's own name, address and phone
@@ -791,8 +1036,36 @@ function showReceipt(sale) {
         </table>
         <div class="rc-total"><span>Total</span><strong>${naira(sale.total)}</strong></div>
         <div class="rc-foot">${esc(s.receipt_note || "Thank you for your patronage")}</div>
-        <div class="rc-ref">${esc(sale.receipt_no)}</div>`;
+        <div class="rc-ref">${esc(sale.receipt_no)}</div>
+        ${isLive(sale) ? "" : `<div class="rc-void"><strong>${sale.void_type === "return" ? "RETURNED" : "CANCELLED"}</strong>
+            by ${esc(sale.voided_by)} · ${fmtWhen(sale.voided_at)}<br>${esc(sale.void_reason)}</div>`}`;
+    $("voidSaleBtn").hidden = !(isAdmin() && isLive(sale));
     openModal("receiptModal");
+}
+
+/* Cancel / return a sale (owner) — the sale stays on record, the parts go back into stock */
+function openVoidModal() {
+    const r = state.lastReceipt;
+    if (!r) return;
+    $("voidSaleInfo").textContent = `Receipt ${receiptShort(r.receipt_no)} · ${naira(r.total)} · sold by ${r.username}`;
+    $("voidReason").value = "";
+    document.querySelector('input[name="voidType"][value="cancel"]').checked = true;
+    openModal("voidModal");
+}
+async function confirmVoidSale() {
+    const r = state.lastReceipt;
+    const reason = $("voidReason").value.trim();
+    if (!reason) return toast("Say why, so the record makes sense later", "error");
+    const type = document.querySelector('input[name="voidType"]:checked').value;
+    try {
+        const sale = await apiFetch(`/sales/${r.id}/void`, { method: "POST", body: JSON.stringify({ type, reason }) });
+        closeModal("voidModal");
+        toast(type === "return" ? "Return recorded — parts are back in stock" : "Sale cancelled — parts are back in stock", "success");
+        showReceipt(sale);
+        await fetchParts();
+        loadSalesHistory();
+        if ($("dashboard").classList.contains("active")) loadTodaySummary();
+    } catch (err) { toast(err.message, "error"); }
 }
 
 function printReceipt() {
@@ -805,6 +1078,7 @@ function shareReceipt() {
     const r = state.lastReceipt, s = state.shop;
     if (!r) return;
     const text = [
+        isLive(r) ? null : `*${r.void_type === "return" ? "RETURNED" : "CANCELLED"}*`,
         `*${shopName()}*`,
         s.address || null,
         s.phone || null,
@@ -823,11 +1097,299 @@ function shareReceipt() {
 }
 
 /* ------------------------------------------------------------------
+   STOCK COUNT — staff count the shelf, the owner reviews differences.
+   Scans here only add to the count; they never sell or change stock.
+------------------------------------------------------------------ */
+state.count = null;          // my open count, with lines
+state.countSearch = "";
+
+const COUNT_STATUS = {
+    open:      ["Counting", "plain"],
+    submitted: ["Waiting for owner", "low"],
+    approved:  ["Reviewed", "ok"],
+    rejected:  ["Set aside", "out"]
+};
+const countPill = c => { const [t, cls] = COUNT_STATUS[c.status] || [c.status, "plain"]; return `<span class="pill ${cls}">${t}</span>`; };
+const diffText = d => d === 0 ? `<span class="muted">matches</span>`
+    : `<span class="count-row-diff ${d > 0 ? "diff-pos" : "diff-neg"}">${d > 0 ? "+" : ""}${d}</span>`;
+
+async function loadCounts() {
+    const out = $("countBody");
+    try {
+        const list = await apiFetch("/counts");
+        updateCountBadge(list);
+        const mine = list.find(c => c.status === "open" && c.user_id === state.user.id);
+        state.count = mine ? await apiFetch(`/counts/${mine.id}`) : null;
+        // Numbers counted offline and not yet sent still show as counted
+        if (state.count) for (const op of getPending()) {
+            if (kindOf(op) !== "count" || op.count_id !== state.count.id || op.status !== "pending") continue;
+            const part = state.parts.find(p => p.id === op.part_id);
+            const old = state.count.lines.find(l => l.part_id === op.part_id);
+            state.count.lines = state.count.lines.filter(l => l.part_id !== op.part_id);
+            if (op.counted !== null) {
+                const expected = old ? old.expected : Math.max(part?.qty ?? 0, 0);
+                state.count.lines.push({ part_id: op.part_id, part_name: op.name, sku: part?.sku, expected, counted: op.counted, difference: op.counted - expected });
+            }
+        }
+        store(countCacheKey(), state.count ? JSON.stringify(state.count) : null);
+        const waiting = isAdmin() ? list.filter(c => c.status === "submitted") : [];
+        const history = list.filter(c => c !== mine && !waiting.includes(c)).slice(0, 10);
+
+        out.innerHTML = `
+            ${waiting.length ? `<div class="section-title">Waiting for your review</div>
+                <div class="list">${waiting.map(c => `
+                    <div class="list-row clickable" onclick="openCountReview(${c.id})">
+                        <div class="list-icon" style="background:var(--low-bg);color:var(--low)"><i class="fa-solid fa-clipboard-list"></i></div>
+                        <div class="list-main"><strong>Count #${c.id} by ${esc(c.username)}</strong>
+                            <div class="muted">${esc(c.note || "")}${c.note ? " · " : ""}${count(c.lines, "part")} counted · ${count(c.differences, "difference")}</div></div>
+                        <button class="btn btn-primary btn-sm">Review</button>
+                    </div>`).join("")}</div>` : ""}
+            <div id="countWork">${state.count ? renderCountWork() : renderCountStart()}</div>
+            ${history.length ? `<div class="section-title">Earlier counts</div>
+                <div class="list">${history.map(c => `
+                    <div class="list-row ${isAdmin() || c.status !== "open" ? "clickable" : ""}" onclick="openCountReview(${c.id})">
+                        <div class="list-icon"><i class="fa-solid fa-clipboard-check"></i></div>
+                        <div class="list-main"><strong>Count #${c.id}${isAdmin() ? " by " + esc(c.username) : ""}</strong>
+                            <div class="muted">${fmtWhen(c.created_at)} · ${count(c.lines, "part")} · ${count(c.differences, "difference")}${c.review_note ? " · " + esc(c.review_note) : ""}</div></div>
+                        ${countPill(c)}
+                    </div>`).join("")}</div>` : ""}`;
+        if (state.count) setTimeout(() => $("countScanInput")?.focus(), 50);
+    } catch (err) {
+        if (err.offline && !state.count) {
+            try { state.count = JSON.parse(load(countCacheKey()) || "null"); } catch (_) {}
+        }
+        if (err.offline && state.count) {
+            // Offline in the middle of a count: carry on with what this phone has
+            out.innerHTML = `<div class="notice warn"><i class="fa-solid fa-wifi"></i><div>No internet. You can keep counting —
+                the numbers stay on this phone and are sent when you're back online.</div></div><div id="countWork">${renderCountWork()}</div>`;
+            return;
+        }
+        out.innerHTML = `<div class="notice alert"><i class="fa-solid fa-circle-exclamation"></i><div>${esc(err.offline
+            ? "No internet. Start a count when you're online; after that you can keep counting offline." : err.message)}</div></div>`;
+    }
+}
+
+const countCacheKey = () => pendingKey().replace("sp_pending_", "sp_count_");
+
+function updateCountBadge(list) {
+    const n = isAdmin() ? list.filter(c => c.status === "submitted").length : 0;
+    const b = $("countBadge");
+    if (b) { b.hidden = !n; b.textContent = n; }
+}
+
+function renderCountStart() {
+    return `
+    <div class="card">
+        <h3><i class="fa-solid fa-clipboard-check"></i> Start a stock count</h3>
+        <p class="muted small" style="margin-bottom:14px;">Go shelf by shelf. Scan each item (every beep adds one) or type the number you see.
+           Nothing in stock changes until the owner looks at the differences and approves them.</p>
+        <div class="form-row"><label class="field-label" for="countNote">What are you counting? <span class="muted">(optional)</span></label>
+            <input id="countNote" maxlength="120" placeholder="e.g. Shelf A, brake parts, whole shop"></div>
+        <button class="btn btn-primary" onclick="startCount()"><i class="fa-solid fa-play"></i> Start counting</button>
+    </div>`;
+}
+
+function renderCountWork() {
+    const c = state.count;
+    const byPart = new Map(c.lines.map(l => [l.part_id, l]));
+    const q = state.countSearch.toLowerCase();
+    const parts = state.parts.filter(p => !q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q) || (p.barcode || "").toLowerCase().includes(q));
+    const diffs = c.lines.filter(l => l.difference !== 0).length;
+    return `
+    <div class="card">
+        <div class="count-head">
+            <h3><i class="fa-solid fa-clipboard-list"></i> Count #${c.id}${c.note ? " · " + esc(c.note) : ""}</h3>
+            <div class="mini-stats"><span><strong>${c.lines.length}</strong> of ${state.parts.length} parts counted</span>
+                <span><strong>${diffs}</strong> ${diffs === 1 ? "difference" : "differences"}</span></div>
+        </div>
+        <div class="scan-row">
+            <div class="input-icon"><i class="fa-solid fa-barcode"></i>
+                <input class="input" id="countScanInput" placeholder="Scan or type barcode / SKU — adds 1" autocomplete="off" onkeydown="handleCountScanInput(event)"></div>
+            <button class="btn btn-soft" onclick="openScanner('count')" title="Scan with camera"><i class="fa-solid fa-camera"></i><span class="hide-sm">Camera</span></button>
+        </div>
+        <div class="toolbar" style="margin-top:12px;">
+            <div class="search"><i class="fa-solid fa-magnifying-glass"></i>
+                <input class="input" type="search" placeholder="Find a part" value="${esc(state.countSearch)}" oninput="state.countSearch=this.value;refreshCountTable()"></div>
+        </div>
+        <div class="table-wrap"><table class="table">
+            <thead><tr><th>Part</th><th class="num">App says</th><th class="num">You counted</th><th class="num">Difference</th></tr></thead>
+            <tbody id="countTableBody">${countRows(parts, byPart)}</tbody>
+        </table></div>
+        <div class="toolbar" style="justify-content:flex-end;margin:16px 0 0;">
+            <span class="muted small">Leave a box empty if you didn't count that part.</span>
+            ${isAdmin()
+                ? `<button class="btn btn-primary" onclick="openCountReview(${c.id})" ${c.lines.length ? "" : "disabled"}><i class="fa-solid fa-check"></i> Finish &amp; review</button>`
+                : `<button class="btn btn-primary" onclick="submitCount()" ${c.lines.length ? "" : "disabled"}><i class="fa-solid fa-paper-plane"></i> Send to owner</button>`}
+        </div>
+    </div>`;
+}
+
+function countRows(parts, byPart) {
+    return parts.length ? parts.map(p => {
+        const l = byPart.get(p.id);
+        return `
+        <tr class="${l ? "counted" : ""}">
+            <td class="card-title"><div class="part-name">${esc(p.name)}</div><div class="part-sub code">${esc(p.sku)}</div></td>
+            <td class="num" data-label="App says">${l ? l.expected : Math.max(p.qty, 0)}</td>
+            <td class="num" data-label="You counted"><input class="input count-input" type="number" min="0" inputmode="numeric"
+                value="${l ? l.counted : ""}" placeholder="—" onchange="setCountLine(${p.id}, this.value)"></td>
+            <td class="num" data-label="Difference">${l ? diffText(l.difference) : ""}</td>
+        </tr>`;
+    }).join("") : `<tr><td class="empty-cell" colspan="4">No parts match.</td></tr>`;
+}
+
+function refreshCountTable() {
+    if (!state.count) return;
+    $("countWork").innerHTML = renderCountWork();
+    const s = document.querySelector("#countWork .search input");
+    if (s && state.countSearch) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); }
+}
+
+async function startCount() {
+    try {
+        state.count = await apiFetch("/counts", { method: "POST", body: JSON.stringify({ note: $("countNote")?.value.trim() || "" }) });
+        loadCounts();
+    } catch (err) { toast(err.message, "error"); }
+}
+
+async function setCountLine(partId, value, quiet = false) {
+    if (!state.count) return;
+    const v = String(value).trim();
+    try {
+        state.count = await apiFetch(`/counts/${state.count.id}/lines`, {
+            method: "PUT", body: JSON.stringify({ part_id: partId, counted: v === "" ? null : Number(v) }) });
+        store(countCacheKey(), JSON.stringify(state.count));
+        if (!quiet) refreshCountTable();
+        return true;
+    } catch (err) {
+        if (!err.offline) { toast(err.message, "error"); return false; }
+        // No internet: keep the number on this phone and update the screen; it's sent when the connection is back
+        const part = state.parts.find(p => p.id === partId);
+        if (!part) return false;
+        queueOfflineCount(state.count.id, part, v === "" ? null : Number(v));
+        const lines = state.count.lines.filter(l => l.part_id !== partId);
+        if (v !== "") {
+            const old = state.count.lines.find(l => l.part_id === partId);
+            const expected = old ? old.expected : Math.max(part.qty, 0);
+            lines.push({ part_id: partId, part_name: part.name, sku: part.sku, expected, counted: Number(v), difference: Number(v) - expected });
+        }
+        state.count = { ...state.count, lines };
+        store(countCacheKey(), JSON.stringify(state.count));
+        if (!quiet) refreshCountTable();
+        return true;
+    }
+}
+
+function handleCountScanInput(e) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    addCountByCode(e.target.value);
+    e.target.value = "";
+}
+
+async function addCountByCode(code) {
+    const p = findPartByCode(code);
+    if (!p) {
+        beep(false);
+        toast("This code isn't on any part yet, so it wasn't counted. The owner can add it with Edit in Stock.", "error");
+        return false;
+    }
+    const line = state.count?.lines.find(l => l.part_id === p.id);
+    const ok = await setCountLine(p.id, (line ? line.counted : 0) + 1, true);
+    if (ok) {
+        beep(true);
+        const now = state.count.lines.find(l => l.part_id === p.id);
+        toast(`${p.name}: ${now.counted} counted`, "success");
+        refreshCountTable();
+        setTimeout(() => $("countScanInput")?.focus(), 30);
+    }
+    return ok;
+}
+
+async function submitCount() {
+    if (!state.count) return;
+    if (getPending().some(o => kindOf(o) === "count" && o.count_id === state.count.id && o.status === "pending"))
+        return toast("Some counted parts are still on this phone. Connect to the internet, press Send now, then send the count.", "error");
+    if (!confirm(`Send count #${state.count.id} to the owner? You won't be able to change it after.`)) return;
+    try {
+        await apiFetch(`/counts/${state.count.id}/submit`, { method: "POST" });
+        toast("Sent to the owner for review", "success");
+        state.count = null;
+        loadCounts();
+    } catch (err) { toast(err.message, "error"); }
+}
+
+/* Owner review: tick the differences to correct, add a note, approve — or set the count aside */
+async function openCountReview(id) {
+    try {
+        const c = await apiFetch(`/counts/${id}`);
+        const reviewable = isAdmin() && (c.status === "submitted" || (c.status === "open" && c.user_id === state.user.id));
+        const diffs = c.lines.filter(l => l.difference !== 0);
+        const matched = c.lines.length - diffs.length;
+        $("countReviewBody").innerHTML = `
+            <h3><i class="fa-solid fa-clipboard-check"></i> Count #${c.id} by ${esc(c.username)} ${countPill(c)}</h3>
+            <p class="modal-sub">${esc(c.note || "")}${c.note ? " · " : ""}started ${fmtWhen(c.created_at)}${c.submitted_at ? ` · sent ${fmtWhen(c.submitted_at)}` : ""}
+               · ${count(c.lines.length, "part")} counted, ${matched} matched the app.</p>
+            ${diffs.length ? `
+            <div class="table-wrap" style="margin-bottom:14px;"><table class="table">
+                <thead><tr>${reviewable ? `<th></th>` : ""}<th>Part</th><th class="num">App said</th><th class="num">Counted</th><th class="num">Difference</th><th class="num">${c.status === "approved" ? "Corrected" : "In stock now"}</th></tr></thead>
+                <tbody>${diffs.map(l => `
+                    <tr>${reviewable ? `<td><input type="checkbox" class="count-apply" value="${l.part_id}" checked></td>` : ""}
+                        <td class="card-title"><div class="part-name">${esc(l.part_name)}</div><div class="part-sub code">${esc(l.sku || "")}</div></td>
+                        <td class="num" data-label="App said">${l.expected}</td>
+                        <td class="num" data-label="Counted">${l.counted}</td>
+                        <td class="num" data-label="Difference">${diffText(l.difference)}</td>
+                        <td class="num" data-label="${c.status === "approved" ? "Corrected" : "In stock now"}">${c.status === "approved" ? (l.applied ? "✓ yes" : "no") : (l.current_qty ?? "deleted")}</td>
+                    </tr>`).join("")}</tbody>
+            </table></div>` : `<div class="notice" style="background:var(--ok-bg);color:var(--ok)"><i class="fa-solid fa-circle-check"></i><div>Every part counted matches the app.</div></div>`}
+            ${c.review_note ? `<p class="small"><strong>${c.status === "approved" ? "Owner's note" : "Set aside because"}:</strong> ${esc(c.review_note)} — ${esc(c.reviewed_by)}, ${fmtWhen(c.reviewed_at)}</p>` : ""}
+            ${reviewable ? `
+            <p class="form-hint" style="margin-bottom:10px;">A difference is something to look into, not proof that anyone took anything — recount, check for unrecorded sales,
+               damaged or returned items first. Ticked parts move by the difference found, so sales made since the count are kept.</p>
+            <div class="form-row"><label class="field-label" for="countReviewNote">Your note</label>
+                <input id="countReviewNote" maxlength="200" placeholder="e.g. recounted brake pads, 2 found damaged"></div>` : ""}
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('countReviewModal')">Close</button>
+                ${reviewable && c.status === "submitted" ? `<button class="btn btn-danger-soft" onclick="reviewCount(${c.id}, 'reject')">Set aside</button>` : ""}
+                ${reviewable ? `<button class="btn btn-primary" onclick="reviewCount(${c.id}, 'approve')"><i class="fa-solid fa-check"></i> ${diffs.length ? "Correct ticked parts" : "Mark as checked"}</button>` : ""}
+            </div>`;
+        openModal("countReviewModal");
+    } catch (err) { toast(err.message, "error"); }
+}
+
+async function reviewCount(id, action) {
+    const reason = $("countReviewNote").value.trim();
+    if (!reason) return toast("Add a short note about what you found", "error");
+    const part_ids = [...document.querySelectorAll(".count-apply:checked")].map(i => Number(i.value));
+    try {
+        await apiFetch(`/counts/${id}/${action}`, { method: "POST", body: JSON.stringify({ reason, part_ids }) });
+        closeModal("countReviewModal");
+        toast(action === "approve" ? `Done — ${count(part_ids.length, "part")} corrected` : "Count set aside, no stock changed", "success");
+        if (state.count?.id === id) state.count = null;
+        await fetchParts();
+        loadCounts();
+    } catch (err) { toast(err.message, "error"); }
+}
+
+/* ------------------------------------------------------------------
    DAILY REPORT (owner)
 ------------------------------------------------------------------ */
+let reportRange = "day";
+function setReportRange(r) {
+    reportRange = r;
+    document.querySelectorAll("#reportRange .seg-btn").forEach(b => b.classList.toggle("active", b.dataset.range === r));
+    loadReport();
+}
+function shiftDay(d, n) {
+    const t = new Date(d + "T12:00:00"); t.setDate(t.getDate() + n);
+    return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+}
+
 async function loadReport() {
     const dateEl = $("reportDate");
     if (!dateEl.value) dateEl.value = todayLocal();
+    if (reportRange !== "day") return loadPeriodReport(dateEl.value);
+    $("reportTitle").textContent = "Daily Report";
     $("reportSubtitle").textContent = fmtDayLong(dateEl.value);
     const out = $("reportBody");
     out.innerHTML = `<p class="muted">Loading…</p>`;
@@ -859,6 +1421,8 @@ async function loadReport() {
         </div>
         ${r.missing_cost_lines ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-circle-info"></i>
             <div>Profit only counts parts that have a cost price. Add cost prices with <strong>Edit</strong> in Stock to see your full profit.</div></div>` : ""}
+        ${r.voided?.count ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-rotate-left"></i>
+            <div>${count(r.voided.count, "sale")} worth ${naira(r.voided.value)} cancelled or returned on this day — not counted above. Open them in Sell → Sales to see why.</div></div>` : ""}
 
         <div class="section-title">End-of-day money check</div>
         ${renderCloseDay(r)}
@@ -892,6 +1456,118 @@ async function loadReport() {
                     <tbody>${r.by_staff.length ? r.by_staff.map(s => `
                         <tr><td class="card-title"><strong>${esc(s.username)}</strong></td><td class="num" data-label="Customers">${s.sales}</td><td class="num" data-label="Amount">${naira(s.revenue)}</td></tr>`).join("")
                         : `<tr><td class="empty-cell" colspan="3">No sales on this day.</td></tr>`}</tbody>
+                </table></div>
+            </div>
+        </div>`;
+    } catch (err) {
+        out.innerHTML = `<div class="notice alert"><i class="fa-solid fa-circle-exclamation"></i><div>${esc(err.message)}</div></div>`;
+    }
+}
+
+/* Week = the 7 days ending on the chosen date. Month = the calendar month of the chosen date. */
+async function loadPeriodReport(anchor) {
+    let from, to, monthEnd = null;
+    if (reportRange === "week") { to = anchor; from = shiftDay(anchor, -6); }
+    else {
+        from = anchor.slice(0, 8) + "01";
+        const [y, m] = anchor.split("-").map(Number);
+        const last = new Date(y, m, 0).getDate();
+        monthEnd = to = anchor.slice(0, 8) + String(last).padStart(2, "0");
+        if (to > todayLocal() && todayLocal() >= from) to = todayLocal();
+    }
+    const [fy, fm] = from.split("-").map(Number);
+    $("reportTitle").textContent = reportRange === "week" ? "Weekly Report" : "Monthly Report";
+    $("reportSubtitle").textContent = reportRange === "week"
+        ? `${fmtDate(from + " 12:00:00", { year: true })} – ${fmtDate(to + " 12:00:00", { year: true })}`
+        : `${MONTHS_LONG[fm - 1]} ${fy}${to < monthEnd ? " so far" : ""}`;
+    const out = $("reportBody");
+    out.innerHTML = `<p class="muted">Loading…</p>`;
+    try {
+        const r = await apiFetch(`/reports/period?from=${from}&to=${to}`);
+        const max = Math.max(...r.days.map(d => d.revenue), 1);
+        const many = r.days.length > 10;
+        const avgDay = r.days.length ? r.revenue / r.days.length : 0;
+        out.innerHTML = `
+        <div class="stat-grid">
+            <div class="stat green">
+                <div class="label"><i class="fa-solid fa-sack-dollar"></i>Sales</div>
+                <div class="value" title="${naira(r.revenue)}">${nairaShort(r.revenue)}</div>
+                <div class="sub">${count(r.sales, "customer")} · about ${nairaShort(Math.round(avgDay))} a day</div>
+            </div>
+            <div class="stat amber">
+                <div class="label"><i class="fa-solid fa-chart-line"></i>Profit</div>
+                <div class="value" title="${naira(r.profit)}">${nairaShort(r.profit)}</div>
+                <div class="sub">${r.missing_cost_lines ? `${count(r.missing_cost_lines, "item")} without a cost price` : "after cost of parts"}</div>
+            </div>
+            <div class="stat blue">
+                <div class="label"><i class="fa-solid fa-box"></i>Items sold</div>
+                <div class="value">${r.items.toLocaleString("en-NG")}</div>
+                <div class="sub">${r.best_day ? `best day: ${dayName(r.best_day.date)}` : "units"}</div>
+            </div>
+            <div class="stat red">
+                <div class="label"><i class="fa-solid fa-warehouse"></i>Stock now</div>
+                <div class="value" title="${naira(r.stock.cost_value || r.stock.sell_value)}">${nairaShort(r.stock.cost_value || r.stock.sell_value)}</div>
+                <div class="sub">${r.stock.cost_value ? "at cost" : "at selling price"} · ${r.stock.low} running low</div>
+            </div>
+        </div>
+        ${r.missing_cost_lines ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-circle-info"></i>
+            <div>Profit only counts parts that have a cost price, so the real figure is higher. Add cost prices with <strong>Edit</strong> in Stock.</div></div>` : ""}
+        ${(r.voided.count || r.corrections.count) ? `<div class="notice warn" style="margin-top:14px;"><i class="fa-solid fa-magnifying-glass"></i><div>
+            ${r.voided.count ? `${count(r.voided.count, "sale")} worth ${naira(r.voided.value)} cancelled or returned (not counted above). ` : ""}
+            ${r.corrections.count ? `${count(r.corrections.count, "stock correction")} (${r.corrections.units > 0 ? "+" : ""}${r.corrections.units} units). ` : ""}
+            Details are in the Activity Log. These are things to check, not proof that anything is wrong.</div></div>` : ""}
+
+        <div class="section-title">Day by day</div>
+        <div class="card" style="padding:0;">
+            <div class="bars ${many ? "many" : ""}" style="grid-template-columns:repeat(${r.days.length},1fr);${many ? "gap:3px;" : ""}">${r.days.map(d => `
+                <div class="bar-col" title="${fmtDayLong(d.date)}: ${naira(d.revenue)} (${count(d.sales, "sale")})">
+                    <div class="bar-val">${d.revenue ? nairaShort(d.revenue) : ""}</div>
+                    <div class="bar-track"><div class="bar" style="height:${Math.round(d.revenue / max * 100)}%"></div></div>
+                    <div class="bar-day">${many ? Number(d.date.slice(8)) : (dayDiff(d.date) === 0 ? "Today" : fmtDayShort(d.date))}</div>
+                </div>`).join("")}
+            </div>
+        </div>
+
+        <div class="report-cols">
+            <div>
+                <div class="section-title">Best sellers</div>
+                <div class="table-wrap"><table class="table">
+                    <thead><tr><th>Part</th><th class="num">Sold</th><th class="num">Amount</th></tr></thead>
+                    <tbody>${r.top_parts.length ? r.top_parts.map(p => `
+                        <tr><td class="card-title"><div class="part-name">${esc(p.part_name)}</div><div class="part-sub code">${esc(p.sku || "")}</div></td>
+                            <td class="num" data-label="Sold">${p.qty}</td><td class="num" data-label="Amount">${naira(p.revenue)}</td></tr>`).join("")
+                        : `<tr><td class="empty-cell" colspan="3">No sales in this period.</td></tr>`}</tbody>
+                </table></div>
+            </div>
+            <div>
+                <div class="section-title">Not selling <span class="muted">in stock, no sales this period</span></div>
+                <div class="table-wrap"><table class="table">
+                    <thead><tr><th>Part</th><th class="num">On shelf</th><th class="num">Money tied up</th></tr></thead>
+                    <tbody>${r.slow_parts.length ? r.slow_parts.map(p => `
+                        <tr><td class="card-title"><div class="part-name">${esc(p.name)}</div><div class="part-sub code">${esc(p.sku || "")}</div></td>
+                            <td class="num" data-label="On shelf">${p.qty}</td><td class="num" data-label="Money tied up">${naira(p.tied_up)}</td></tr>`).join("")
+                        : `<tr><td class="empty-cell" colspan="3">Everything in stock sold at least once.</td></tr>`}</tbody>
+                </table></div>
+            </div>
+        </div>
+
+        <div class="report-cols">
+            <div>
+                <div class="section-title">By staff</div>
+                <div class="table-wrap"><table class="table">
+                    <thead><tr><th>Staff</th><th class="num">Customers</th><th class="num">Amount</th></tr></thead>
+                    <tbody>${r.by_staff.length ? r.by_staff.map(s => `
+                        <tr><td class="card-title"><strong>${esc(s.username)}</strong></td><td class="num" data-label="Customers">${s.sales}</td><td class="num" data-label="Amount">${naira(s.revenue)}</td></tr>`).join("")
+                        : `<tr><td class="empty-cell" colspan="3">No sales in this period.</td></tr>`}</tbody>
+                </table></div>
+            </div>
+            <div>
+                <div class="section-title">How customers paid</div>
+                <div class="table-wrap"><table class="table">
+                    <thead><tr><th>Payment</th><th class="num">Amount</th><th class="num">Share</th></tr></thead>
+                    <tbody>${["cash", "pos", "transfer"].map(m => `
+                        <tr><td class="card-title"><strong>${PAY_LABELS[m]}</strong></td><td class="num" data-label="Amount">${naira(r.by_method[m] || 0)}</td>
+                            <td class="num" data-label="Share">${r.revenue ? Math.round((r.by_method[m] || 0) / r.revenue * 100) : 0}%</td></tr>`).join("")}</tbody>
                 </table></div>
             </div>
         </div>`;
@@ -1002,7 +1678,7 @@ function beep(ok) {
 }
 
 /* Camera scanner ---------------------------------------------------- */
-const SCANNER_LIB = "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js";
+const SCANNER_LIB = "vendor/html5-qrcode.min.js";      // kept inside the app so scanning works offline
 const LABEL_LIB   = "https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js";
 const loadedScripts = {};
 function loadScript(src) {
@@ -1025,7 +1701,9 @@ async function openScanner(target) {
     lastScan = { code: "", at: 0 };
     $("scanHint").textContent = target === "sale"
         ? "Point the camera at a barcode. Each beep adds one to the sale."
-        : "Point the camera at the barcode on the box.";
+        : target === "count"
+            ? "Counting: each beep adds one to the count. Nothing is sold."
+            : "Point the camera at the barcode on the box.";
     $("scanStatus").textContent = "";
     openModal("scannerModal");
 
@@ -1062,6 +1740,7 @@ function onScan(text) {
     if (stillInView) return;
 
     if (state.scanTarget === "sale") { addByCode(text); return; }
+    if (state.scanTarget === "count") { addCountByCode(text); return; }
     $(state.scanTarget === "editBarcode" ? "editBarcode" : "newBarcode").value = text;
     beep(true);
     closeScanner();
@@ -1230,7 +1909,7 @@ async function checkStorage() {
 
 async function downloadBackup() {
     try {
-        const res = await fetch(`${BASE}/admin/backup`, { headers: { Authorization: `Bearer ${state.token}` } });
+        const res = await fetch(`${apiBase()}/admin/backup`, { headers: { Authorization: `Bearer ${state.token}` } });
         if (!res.ok) throw new Error("The backup didn't download — try again");
         const blob = await res.blob();
         const a = document.createElement("a");
@@ -1248,7 +1927,7 @@ async function restoreBackup(input) {
     if (!file) return;
     if (!confirm(`Replace ALL current data with "${file.name}"?\n\nDownload a backup of today's data first if you might need it.`)) return;
     try {
-        const res = await fetch(`${BASE}/admin/restore`, {
+        const res = await fetch(`${apiBase()}/admin/restore`, {
             method: "POST",
             headers: { Authorization: `Bearer ${state.token}`, "Content-Type": "application/octet-stream" },
             body: file
@@ -1276,7 +1955,16 @@ const ACTIONS = {
     DAY_CLOSE:       ["Day check",         "fa-lock",           "c-ok"],
     SHOP_DETAILS:    ["Shop details",      "fa-store",          "c-accent"],
     BACKUP:          ["Backup downloaded", "fa-download",       "c-muted"],
-    RESTORE:         ["Backup restored",   "fa-upload",         "c-low"]
+    RESTORE:         ["Backup restored",   "fa-upload",         "c-low"],
+    VOID_SALE:       ["Sale cancelled",    "fa-rotate-left",    "c-out"],
+    LOGIN:           ["Signed in",         "fa-right-to-bracket", "c-muted"],
+    LOGOUT:          ["Signed out",        "fa-right-from-bracket", "c-muted"],
+    LOGIN_FAILED:    ["Wrong password",    "fa-user-lock",      "c-low"],
+    LOGIN_BLOCKED:   ["Sign-in blocked",   "fa-ban",            "c-out"],
+    COUNT_START:     ["Count started",     "fa-clipboard-list", "c-accent"],
+    COUNT_SUBMIT:    ["Count sent",        "fa-paper-plane",    "c-accent"],
+    COUNT_APPROVE:   ["Count reviewed",    "fa-clipboard-check","c-ok"],
+    COUNT_REJECT:    ["Count set aside",   "fa-clipboard",      "c-low"]
 };
 
 // Older entries had plain numbers ("₦5000"); show them with commas

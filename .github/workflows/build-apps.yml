@@ -1,0 +1,76 @@
+# Builds the SpareParts Pro apps on GitHub's computers (free), so nothing heavy runs on your PC.
+#   Windows: installer (Setup .exe) + portable .exe
+#   Android: .apk to install on Android phones
+# Runs when app files change on main, or by hand: GitHub → Actions → "Build apps" → Run workflow.
+# Push a tag like v1.0.1 to also publish the files as a Release (easy download link for testers).
+name: Build apps
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["frontend/**", "desktop/**", "mobile/**", "scripts/**", ".github/workflows/build-apps.yml"]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build Windows app
+        working-directory: desktop
+        run: |
+          npm install --no-audit --no-fund
+          npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpareParts-Pro-Windows
+          path: |
+            desktop/dist/*.exe
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+      - uses: android-actions/setup-android@v3
+      - name: Build Android app
+        working-directory: mobile
+        run: |
+          npm install --no-audit --no-fund
+          npm run sync
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          mv app/build/outputs/apk/debug/app-debug.apk ../SpareParts-Pro-Android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpareParts-Pro-Android
+          path: mobile/SpareParts-Pro-Android.apk
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          body: |
+            **Windows:** download `SpareParts-Pro-Setup-…exe` and run it (or the Portable .exe, which needs no install).
+            **Android:** download `SpareParts-Pro-Android.apk` on the phone and open it (allow "install unknown apps" once).
+            **iPhone:** open the shop's web address in Safari → Share → Add to Home Screen.
