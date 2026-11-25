@@ -3,7 +3,7 @@
   "productName": "SpareParts Pro",
   "version": "1.0.0",
   "description": "SpareParts Pro — stock, sales and receipts for spare parts dealers",
-  "author": "Perpetua Muokwe",
+  "author": "Muokwe Matai",
   "private": true,
   "main": "main.js",
   "scripts": {
