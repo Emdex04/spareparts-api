@@ -174,3 +174,18 @@ offline counts/receiving; stock receiving sessions with a review screen.
 - Owner can **Forget** a customer (contact details deleted, sales kept). Adding, editing, forgetting and sending are logged.
 - Offline: customers can be added during an offline sale; a mistyped phone never stops an offline sale from saving.
 - SRS v1.5 (`docs/SRS.md`, section 17).
+
+---
+
+# On-device database, offline and speed — 25 Nov 2026
+- **On-device SQL database** (SQLite inside the app, saved on the device): customers, parts and sales history are copied
+  from the server after sign-in and after each sale, so customer history, past days' sales and receipts open with no internet.
+- **Usually buys**: parts a customer bought on 3 or more separate visits (owner can change the number in Settings) show on
+  their profile, and as one-tap buttons at the till when that customer is picked.
+- **Offline**: every screen shows the last saved data with a "showing what this device saved" strip; offline sales count in
+  today's totals ("waiting to send"); the business name shows offline; customers can be added offline.
+- **Loading bar** at the top while data loads, and a note when a sleeping server is waking up (can take up to a minute).
+- **Faster**: compressed downloads (app code 135 KB → 35 KB), fonts/icons cached 30 days, stock list drawn from the device first.
+- Android build on GitHub fixed (removed a retired setup step).
+- SRS v1.6 (`docs/SRS.md`, section 18).
+

@@ -2,7 +2,7 @@
    - The app's own files are kept on the phone, so the app still opens with no internet.
    - Shop data (/api) always comes from the server. With no internet the app gets a clear
      "offline" answer (status 503) and keeps sales on the phone until the connection is back. */
-const CACHE_NAME = "spareparts-v9";
+const CACHE_NAME = "spareparts-v10";
 
 const APP_FILES = [
     "./",
@@ -12,6 +12,9 @@ const APP_FILES = [
     "./manifest.json",
     "./icons/icon-192.png",
     "./icons/icon-512.png",
+    "./localdb.js",
+    "./vendor/sqljs/sql-wasm.js",
+    "./vendor/sqljs/sql-wasm.wasm",
     "./vendor/html5-qrcode.min.js",
     "./vendor/fontawesome/css/all.min.css",
     "./vendor/fontawesome/webfonts/fa-solid-900.woff2",

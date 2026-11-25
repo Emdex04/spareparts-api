@@ -1,4 +1,5 @@
 const express   = require("express");
+const compression = require("compression");          // smaller downloads = faster loading on slow networks
 const cors      = require("cors");
 const path      = require("path");
 const fs        = require("fs");
@@ -11,6 +12,7 @@ const PORT = process.env.PORT || 5000;              // Render sets PORT itself
 const TZ_OFFSET_HOURS = Number(process.env.TZ_OFFSET_HOURS ?? 1); // Lagos = UTC+1
 const SESSION_DAYS    = 7;
 
+app.use(compression());
 app.use(cors());
 app.use(express.json({ limit: "200kb" }));
 
@@ -240,6 +242,8 @@ async function migrate() {
         if (!(await columnExists("sales", col)))
             await run(`ALTER TABLE sales ADD COLUMN ${col} TEXT`);
     await run("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_ref ON sales(client_ref) WHERE client_ref IS NOT NULL");
+    if (!(await columnExists("op_refs", "result_id")))
+        await run("ALTER TABLE op_refs ADD COLUMN result_id INTEGER");
     if (!(await columnExists("sales", "customer_id")))
         await run("ALTER TABLE sales ADD COLUMN customer_id INTEGER");
     await run("CREATE INDEX IF NOT EXISTS idx_sales_customer ON sales(customer_id)");
@@ -709,12 +713,24 @@ async function startServer() {
     }));
 
     app.post("/api/customers", requireAuth, h(async (req, res) => {
+        // Customers added offline carry the device's reference, so one sent twice is saved once
+        const ref = String(req.body?.client_ref || "").trim();
+        if (ref && !/^[A-Za-z0-9-]{8,64}$/.test(ref)) return res.status(400).json({ message: "Bad reference" });
+        if (ref) {
+            const done = await get("SELECT result_id FROM op_refs WHERE ref = ?", [ref]);
+            if (done) {
+                const c = await get(`SELECT c.*, ${CUSTOMER_STATS} FROM customers c WHERE c.id = ?`, [done.result_id || 0]);
+                if (c) return res.json({ ...c, duplicate: true });
+            }
+        }
         const f = readCustomerFields(req.body || {});
         if (f.error) return res.status(400).json({ message: f.error });
         if (f.value.phone && await get("SELECT id FROM customers WHERE phone = ?", [f.value.phone]))
             return res.status(400).json({ message: "A customer with this phone number is already saved" });
         const r = await run(`INSERT INTO customers (name, phone, email, consent, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
                             [f.value.name, f.value.phone, f.value.email, f.value.consent, f.value.note, req.user.username, localNow()]);
+        if (ref) await run("INSERT OR IGNORE INTO op_refs (ref, kind, user_id, created_at, result_id) VALUES (?, 'customer', ?, ?, ?)",
+                           [ref, req.user.id, localNow(), r.lastInsertRowid]);
         await writeAudit({ user: req.user, action: "ADD_CUSTOMER", note: `Added customer ${f.value.name}` });
         res.status(201).json(await get(`SELECT c.*, ${CUSTOMER_STATS} FROM customers c WHERE c.id = ?`, [r.lastInsertRowid]));
     }));
@@ -744,7 +760,14 @@ async function startServer() {
         const items = sales.length ? await query(`SELECT sale_id, part_name, qty, unit_price, line_total FROM sale_items
                                                   WHERE sale_id IN (${sales.map(() => "?").join(",")}) ORDER BY id`, sales.map(s => s.id)) : [];
         for (const s of sales) s.items = items.filter(i => i.sale_id === s.id);
-        res.json({ ...c, sales });
+        // "Usually buys": parts this customer bought on at least N separate visits (N set in Settings, default 3)
+        const after = Math.max(2, toInt((await readShop()).favourite_after) || 3);
+        const favourites = await query(`SELECT i.part_id, MAX(i.part_name) AS part_name, COUNT(DISTINCT s.id) AS times,
+                                               SUM(i.qty) AS qty, MAX(s.created_at) AS last_bought
+                                        FROM sale_items i JOIN sales s ON s.id = i.sale_id
+                                        WHERE s.customer_id = ? AND s.status = 'completed' AND i.part_id IS NOT NULL
+                                        GROUP BY i.part_id HAVING times >= ? ORDER BY times DESC, last_bought DESC LIMIT 8`, [c.id, after]);
+        res.json({ ...c, sales, favourites, favourite_after: after });
     }));
 
     app.delete("/api/customers/:id", requireAdmin, h(async (req, res) => {
@@ -767,6 +790,31 @@ async function startServer() {
         const what = String(req.body?.what || "receipt").slice(0, 80);
         await writeAudit({ user: req.user, action: "RECEIPT_SENT", note: `${what} sent to ${c.name} by ${channel}` });
         res.json({ ok: true });
+    }));
+
+    /* =========================
+       SYNC — the app copies sales history into its own on-device SQL database, a page at a time,
+       so customer history, "usually buys" and past sales work with no internet.
+    ========================= */
+    app.get("/api/sync", requireAuth, h(async (req, res) => {
+        const sinceId = Math.max(toInt(req.query.since_id) || 0, 0);
+        const since   = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(req.query.since || "") ? req.query.since : null;
+        const LIMIT = 500;
+        // Staff get their own sales, plus sales to named customers (which customer profiles already show them)
+        const isAdmin = req.user.role === "admin";
+        const staffOnly = isAdmin ? "" : "AND (user_id = ? OR customer_id IS NOT NULL)";
+        const staffArgs = isAdmin ? [] : [req.user.id];
+        const sales = await query(`SELECT id, receipt_no, customer_id, customer, total, item_count, payment_method, username,
+                                          created_at, status, void_type, void_reason, voided_by, voided_at
+                                   FROM sales WHERE id > ? ${staffOnly} ORDER BY id LIMIT ${LIMIT}`, [sinceId, ...staffArgs]);
+        // Sales cancelled since the last sync (they were already copied as "completed")
+        const changed = since ? await query(`SELECT id, status, void_type, void_reason, voided_by, voided_at FROM sales
+                                             WHERE voided_at IS NOT NULL AND voided_at >= ? AND id <= ? ${staffOnly}`, [since, sinceId, ...staffArgs]) : [];
+        const ids = sales.map(x => x.id);
+        const items = ids.length ? await query(`SELECT sale_id, part_id, part_name, sku, qty, unit_price, line_total
+                                                FROM sale_items WHERE sale_id IN (${ids.map(() => "?").join(",")})`, ids) : [];
+        res.json({ sales, items, changed, more: sales.length === LIMIT,
+                   last_id: ids.length ? ids[ids.length - 1] : sinceId, server_time: localNow() });
     }));
 
     /* =========================
@@ -1179,9 +1227,9 @@ async function startServer() {
     /* =========================
        SHOP DETAILS (shown on receipts)
     ========================= */
-    const SHOP_KEYS = { name: 60, address: 120, phone: 40, receipt_note: 120 };
+    const SHOP_KEYS = { name: 60, address: 120, phone: 40, receipt_note: 120, favourite_after: 2 };
     async function readShop() {
-        const out = { name: "", address: "", phone: "", receipt_note: "" };
+        const out = { name: "", address: "", phone: "", receipt_note: "", favourite_after: "3" };
         for (const r of await query("SELECT key, value FROM settings WHERE key LIKE 'shop_%'"))
             out[r.key.slice(5)] = r.value || "";
         return out;
@@ -1193,7 +1241,12 @@ async function startServer() {
         const stmts = [];
         for (const [k, max] of Object.entries(SHOP_KEYS)) {
             if (req.body?.[k] === undefined) continue;
-            const v = String(req.body[k]).trim().slice(0, max);
+            let v = String(req.body[k]).trim().slice(0, max);
+            if (k === "favourite_after") {
+                const n = toInt(v);
+                if (!(n >= 2 && n <= 20)) return res.status(400).json({ message: "\"Usually buys\" must be between 2 and 20 purchases" });
+                v = String(n);
+            }
             stmts.push({ sql: "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", args: ["shop_" + k, v] });
         }
         if (stmts.length) await client.batch(stmts, "write");
@@ -1284,7 +1337,13 @@ async function startServer() {
 
     // Serve the app screens from the same server
     const FRONTEND = path.join(__dirname, "..", "frontend");
-    if (fs.existsSync(FRONTEND)) app.use(express.static(FRONTEND));
+    // Fonts, icons and the barcode reader never change between versions → the browser keeps them 30 days.
+    // The app's own files are re-checked each time (quick "not changed" answer), so updates show at once.
+    if (fs.existsSync(FRONTEND)) {
+        app.use("/vendor", express.static(path.join(FRONTEND, "vendor"), { maxAge: "30d", immutable: true }));
+        app.use("/icons", express.static(path.join(FRONTEND, "icons"), { maxAge: "7d" }));
+        app.use(express.static(FRONTEND, { maxAge: 0, etag: true }));
+    }
 
     // Any unexpected error: log it, answer cleanly, keep running
     app.use((err, req, res, next) => {

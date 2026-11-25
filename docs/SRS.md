@@ -1,7 +1,7 @@
 # SpareParts Pro — Software Requirements Specification
 
-**Version:** 1.5 (update to SRS v1.2)  
-**Date:** 23 November 2026  
+**Version:** 1.6 (update to SRS v1.2)  
+**Date:** 25 November 2026  
 **Owner:** MMM  
 **Status:** Demo test for Dr Dami
 
@@ -12,7 +12,8 @@
 > 2. corrections to v1.2 (section 3),
 > 3. the new **Release 7: Genuine Parts Trail** (sections 4–12),
 > 4. the **installed apps** (Windows, Android) and display rules (sections 14–15), and the **digital receipts** feasibility study (section 16), added in v1.4,
-> 5. **customer profiles** and one-tap WhatsApp / email receipts and purchase history (section 17), added in v1.5.
+> 5. **customer profiles** and one-tap WhatsApp / email receipts and purchase history (section 17), added in v1.5,
+> 6. the **on-device SQL database**, "usually buys", offline improvements and speed (section 18), added in v1.6.
 >
 > Requirement IDs from v1.2 (FR-01 to FR-29, E-FR-03, UC-01 to UC-04, Releases 1–6) keep their numbers. New items start at FR-30 and UC-05 so nothing clashes. When v1.2's full text is merged into this file, sections 2 and 3 replace v1.2's status notes.
 
@@ -26,6 +27,7 @@
 | 1.3 | 23 Nov 2026 | Releases 1–3 went live; Windows/Android apps added. Build status of Releases 1–3 recorded. Corrections to "missing features" list. Release 7 (Genuine Parts Trail) added, with its requirements, use cases, data model, risks and acceptance tests. Release order updated. |
 | 1.4 | 23 Nov 2026 | Offline restocking and stock counting built (Release 3 now built except offline receiving sessions). Installed Windows and Android apps (FR-61 to FR-66). Display rules: upright font, short big amounts (FR-67, FR-68). Digital receipts by email, WhatsApp and SMS: feasibility and proposed requirements (FR-69 to FR-75). |
 | 1.5 | 23 Nov 2026 | Decision: digital receipts Phase A, option 1 (one-tap WhatsApp from the shop's own account, free). Customer profiles built (FR-76 to FR-83); FR-69, FR-70 and FR-75 built, FR-73 built for customer details on offline sales. |
+| 1.6 | 25 Nov 2026 | On-device SQL database (SQLite) for customers, parts and sales history; "usually buys" per customer; every screen shows its last saved data offline; offline sales counted in totals; business name offline; customers can be added offline; loading bar and slow-server note; faster loading (compression, caching). FR-84 to FR-93. |
 
 ---
 
@@ -406,4 +408,42 @@ Build Phase A (free) with the tester release: phone number on the sale, one-tap 
 - Receipt link page (FR-71), so a short message can carry a link instead of the full receipt; later the place to show Genuine Parts Trail checks (Release 7).
 - Fully automatic WhatsApp / SMS (FR-74, Phase B), if testers' customers want receipts without staff tapping Send.
 - Same feature outside spare parts: a school could keep parent profiles and send fee receipts or learning-support session notes the same way.
+
+## 18. On-device database, offline improvements and speed (added in v1.6)
+
+**Context:** feedback after the demo (25 Nov 2026): offline sales should count in the totals, the business name and the last data should show without internet, customers should be kept on the device with their usual purchases, the app should show when it is loading, and it should load faster.
+
+**Decision:** keep the online server as the master copy and add a real SQL database (SQLite, via sql.js) inside the app on each device, filled from the server and saved in the device's own storage (IndexedDB). One database per shop server and person.
+
+### 18.1 Requirements
+
+| ID | Requirement | Status |
+|---|---|---|
+| FR-84 | The app keeps an on-device SQL database of customers, parts and sales history (with items), copied from the server in pages of 500 sales after sign-in and after each sale; cancellations made later are copied too. Staff devices get their own sales plus sales to named customers. | Built |
+| FR-85 | **Usually buys:** a part a customer bought on at least N separate visits is one of their usual purchases (N set by the owner in Settings, 2–20, default 3). Shown on the customer's profile and, when the customer is picked at the till, as one-tap buttons that add the part to the sale. Works offline from the device database. | Built |
+| FR-86 | Without internet, every screen shows the last data the device received (dashboard, sales lists, reports, customers, receipts, stock counts), with a strip saying "No internet — showing what this device saved [time]". | Built |
+| FR-87 | Without internet, the customer profile and purchase history, any past day's sales list and any receipt are read from the device database, even if they were never opened on that device. | Built |
+| FR-88 | Sales made offline count in today's totals and appear in the sales lists straight away, marked "Waiting to send", until they reach the server. | Built |
+| FR-89 | The business name and receipt details show offline (sign-in screen, header, receipts). | Built |
+| FR-90 | A new customer can be added offline (outside a sale); it shows in the list marked as waiting and is sent automatically. The server saves it once even if it arrives twice. | Built |
+| FR-91 | A loading bar shows at the top whenever data takes longer than a quarter of a second; after 6 seconds a note explains that a sleeping free server can take up to a minute to wake. With saved data available, the app gives up waiting after 12 seconds and shows the saved data. | Built |
+| FR-92 | Faster loading: the server compresses responses (the app's code downloads about 4× smaller: 135 KB → 35 KB); fonts, icons and the scanner are cached by the browser for 30 days; the stock list and shop name are drawn from the device first, then refreshed. | Built |
+| FR-93 | The free server is kept awake by a ping every 10 minutes from an outside service (cron-job.org), so the first visit of the day is not slow. | Owner to set up (5 minutes) |
+
+### 18.2 Rules
+- The online server stays the master copy. The device database is a copy for reading offline; changes made offline still travel through the offline queue (sales, restocks, counts, customers) and are checked by the server when they arrive.
+- If the device can't run the database (very old browser, storage turned off), the app works exactly as before, using its simpler saved copies.
+- Changing the shop server or signing in as someone else opens a different device database, so shops and people never mix.
+
+### 18.3 Acceptance tests
+| # | Test | Expected result |
+|---|---|---|
+| AT-26 | Customer bought the same part on 3 visits; pick them at the till | "Usually buys" button for that part; tapping it adds 1 to the sale |
+| AT-27 | Go offline; open a past day's sales never opened before | Sales listed "from this device" |
+| AT-28 | Offline; open a customer never opened before | Profile and full history shown, marked as from this device's records |
+| AT-29 | Offline sale of ₦4,500 | Today's total includes it: "(incl. ₦4,500 waiting to send)"; row marked "Waiting to send" |
+| AT-30 | Offline; reload shop details | Business name still shown |
+| AT-31 | Offline; add a customer with a phone; reconnect | Customer saved on the server once |
+| AT-32 | Slow server (8 seconds) | Loading bar appears at once; slow-server note after 6 seconds |
+| AT-33 | Download the app's code with compression | About 35 KB instead of 135 KB |
 

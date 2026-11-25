@@ -153,18 +153,87 @@ function load(key) {
 /* ------------------------------------------------------------------
    SERVER CALLS
 ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+   SAVED DATA — every screen remembers what it last received, so without internet
+   it shows that (marked "saved at …") instead of an error. Kept per shop server and person.
+------------------------------------------------------------------ */
+const NO_CACHE = /^\/(users\/me|admin\/|audit)/;      // always fresh, or too big to keep
+function cacheKey(path) {
+    const server = IN_APP ? new URL(serverUrl()).host : location.host;
+    return `sp_c:${server}:${(state.user?.username || "-").toLowerCase()}:${path}`;
+}
+function cacheGet(path) {
+    try { const v = JSON.parse(localStorage.getItem(cacheKey(path)) || "null"); return v && v.t ? v : null; } catch (_) { return null; }
+}
+function cachePut(path, data) {
+    const k = cacheKey(path), v = JSON.stringify({ t: Date.now(), d: data });
+    try { localStorage.setItem(k, v); }
+    catch (_) {                                         // storage full: drop the oldest saved screens and try once more
+        try {
+            const old = Object.keys(localStorage).filter(x => x.startsWith("sp_c:"))
+                .map(x => [x, (JSON.parse(localStorage.getItem(x)) || {}).t || 0]).sort((a, b) => a[1] - b[1]);
+            old.slice(0, Math.ceil(old.length / 2)).forEach(([x]) => localStorage.removeItem(x));
+            localStorage.setItem(k, v);
+        } catch (_) {}
+    }
+}
+
+/* Loading bar: appears when anything takes longer than a moment; explains a slow first load */
+let inFlight = 0, loadTimer = null, slowTimer = null;
+function loadingStart() {
+    if (inFlight++ > 0) return;
+    loadTimer = setTimeout(() => document.body.classList.add("is-loading"), 250);
+    slowTimer = setTimeout(() => {
+        const n = $("slowNote");
+        if (n) { n.textContent = "Still loading — the first visit after a quiet spell can take up to a minute while the server wakes up."; n.hidden = false; }
+    }, 6000);
+}
+function loadingEnd() {
+    if (--inFlight > 0) return;
+    inFlight = 0;
+    clearTimeout(loadTimer); clearTimeout(slowTimer);
+    document.body.classList.remove("is-loading");
+    const n = $("slowNote"); if (n) n.hidden = true;
+}
+
+/* "Offline — showing saved data" strip */
+function showSavedStrip(t) {
+    const el = $("savedStrip");
+    if (!el) return;
+    el.innerHTML = `<i class="fa-solid fa-wifi"></i> No internet — showing what this device saved ${esc(fmtWhen(localStamp(new Date(t))))}. New sales, restocks and counts are kept and sent later.`;
+    el.hidden = false;
+}
+function hideSavedStrip() { const el = $("savedStrip"); if (el) el.hidden = true; }
+
 async function apiFetch(path, options = {}) {
     const headers = { "Content-Type": "application/json" };
     if (state.token) headers.Authorization = `Bearer ${state.token}`;
+    const isGet = !options.method || options.method === "GET";
+    const cacheable = isGet && !NO_CACHE.test(path);
+    const saved = cacheable ? cacheGet(path) : null;
+    const offline = msg => Object.assign(new Error(msg), { offline: true });
+    // With saved data to fall back on, don't keep people waiting on a dead connection
+    const ctl = new AbortController();
+    const limit = setTimeout(() => ctl.abort(), saved ? 12000 : 75000);
     let res;
+    loadingStart();
     try {
-        res = await fetch(`${apiBase()}${path}`, { ...options, headers });
-    } catch (_) {
-        throw Object.assign(new Error("Can't reach the server. Check your internet connection."), { offline: true });
+        try {
+            res = await fetch(`${apiBase()}${path}`, { ...options, headers, signal: ctl.signal });
+        } catch (_) {
+            throw offline("Can't reach the server. Check your internet connection.");
+        }
+        // 503 from the app's offline helper (sw.js), or the host waking up / down
+        if (res.status === 503 || res.status === 502 || res.status === 504)
+            throw offline("Can't reach the server right now. Check your internet connection.");
+    } catch (err) {
+        if (err.offline && saved) { showSavedStrip(saved.t); return saved.d; }
+        throw err;
+    } finally {
+        clearTimeout(limit);
+        loadingEnd();
     }
-    // 503 from the app's offline helper (sw.js), or the host waking up / down
-    if (res.status === 503 || res.status === 502 || res.status === 504)
-        throw Object.assign(new Error("Can't reach the server right now. Check your internet connection."), { offline: true });
+    hideSavedStrip();
     const data = await res.json().catch(() => ({}));
     if (res.status === 401 && path !== "/users/login") {
         signOutLocal("Your session ended. Please sign in again.");
@@ -175,8 +244,11 @@ async function apiFetch(path, options = {}) {
         throw new Error(data.message);
     }
     if (!res.ok) throw new Error(data.message || `Something went wrong (${res.status})`);
+    if (cacheable) cachePut(path, data);
     return data;
 }
+// Saved copy of a screen's data, to draw it instantly while the fresh copy loads
+const peek = path => cacheGet(path)?.d ?? null;
 
 /* ------------------------------------------------------------------
    THEME
@@ -196,6 +268,8 @@ function toggleTheme() {
    SHOP NAME (shown on sign-in, sidebar and receipts)
 ------------------------------------------------------------------ */
 async function loadShopName() {
+    const saved = peek("/settings/public");
+    if (saved) { state.shop = { ...state.shop, ...saved }; applyShopName(); }
     try {
         const s = await apiFetch("/settings/public");
         state.shop = { ...state.shop, ...s };
@@ -274,7 +348,8 @@ async function resumeSession() {
 }
 
 function signOutLocal(msg) {
-    Object.assign(state, { token: null, user: null, cart: [], payMethod: null });
+    Object.assign(state, { token: null, user: null, cart: [], payMethod: null, parts: [], customers: [] });
+    window.LocalDB?.close();
     store("sp_token", null);
     $("appContainer").style.display = "none";
     $("loginScreen").style.display = "";
@@ -323,7 +398,7 @@ async function saveServer() {
     // A different shop: forget this device's sign-in and saved stock list from the old one
     store("sp_server", url === DEFAULT_SERVER ? null : url);
     ["sp_token", "sp_user", "sp_parts_cache"].forEach(k => store(k, null));
-    state.shop = { name: "", address: "", phone: "", receipt_note: "" };
+    state.shop = { name: "", address: "", phone: "", receipt_note: "", favourite_after: "3" };
     toggleServerForm(false);
     showServerBox();
     loadShopName();
@@ -426,7 +501,20 @@ function showSection(id) {
 /* ------------------------------------------------------------------
    LOADING DATA
 ------------------------------------------------------------------ */
+/* On-device SQL database (localdb.js): one per shop server and person */
+const dbScope = () => `${IN_APP ? new URL(serverUrl()).host : location.host}:${(state.user?.username || "").toLowerCase()}`;
+function syncLocal() {
+    if (window.LocalDB?.ready) LocalDB.sync(apiFetch).catch(() => {});
+}
+const favAfter = () => Math.max(2, parseInt(state.shop.favourite_after) || 3);
+
 async function initApp() {
+    if (window.LocalDB) LocalDB.open(dbScope()).then(ok => {
+        if (!ok) return;
+        if (state.parts.length) LocalDB.saveParts(state.parts);
+        if (state.customers.some(c => c.id > 0)) LocalDB.saveCustomers(state.customers);
+        syncLocal();
+    });
     await Promise.all([fetchParts(), fetchShop(), fetchCustomers()]);
     renderPending();
     syncPending();
@@ -437,15 +525,23 @@ async function initApp() {
 }
 
 async function fetchShop() {
+    const saved = peek("/settings");
+    if (saved) { state.shop = saved; applyShopName(); }       // shop name and receipt details work offline
     try { state.shop = await apiFetch("/settings"); } catch (_) {}
     applyShopName();
 }
 
 async function fetchParts() {
+    // Draw the stock list this device saved last time straight away, then refresh it
+    if (!state.parts.length) {
+        const saved = load("sp_parts_cache");
+        if (saved) try { state.parts = JSON.parse(saved); renderAll(); } catch (_) {}
+    }
     try {
         state.parts = await apiFetch("/parts");
         applyPendingToParts(state.parts);       // sales / restocks made offline that the server hasn't had yet
         store("sp_parts_cache", JSON.stringify(state.parts));
+        window.LocalDB?.saveParts(state.parts);
         renderAll();
     } catch (err) {
         // Offline: use the last stock list this phone saw, so selling can carry on
@@ -538,10 +634,14 @@ function showStock(filter) {
 async function loadTodaySummary() {
     const list = $("activityList");
     try {
-        const { sales } = await apiFetch(`/sales?date=${todayLocal()}`);
+        const { sales: fromServer } = await apiFetch(`/sales?date=${todayLocal()}`);
+        const waiting = pendingSalesFor(todayLocal());
+        const sales = [...waiting, ...fromServer];
         const kept = sales.filter(isLive);
         const total = kept.reduce((s, x) => s + x.total, 0);
-        $("todayHeading").innerHTML = `${isAdmin() ? "Today's sales" : "Your sales today"} <span class="muted">${count(kept.length, "sale")} · ${money(total)}</span>`;
+        const waitTotal = waiting.reduce((s, x) => s + x.total, 0);
+        $("todayHeading").innerHTML = `${isAdmin() ? "Today's sales" : "Your sales today"} <span class="muted">${count(kept.length, "sale")} · ${money(total)}` +
+            (waiting.length ? ` (incl. ${money(waitTotal)} waiting to send)` : "") + `</span>`;
         list.innerHTML = sales.length ? sales.slice(0, 8).map(saleRow).join("")
             : `<div class="empty" style="border:0;"><i class="fa-solid fa-receipt"></i>No sales yet today.</div>`;
     } catch (err) {
@@ -553,18 +653,27 @@ async function loadTodaySummary() {
 
 function saleRow(s) {
     return `
-        <div class="list-row clickable ${isLive(s) ? "" : "voided"}" onclick="viewReceipt(${s.id})">
+        <div class="list-row ${s.pending ? "pending-row" : "clickable"} ${isLive(s) ? "" : "voided"}" ${s.pending ? "" : `onclick="viewReceipt(${s.id})"`}>
             <div class="list-icon"><i class="fa-solid ${PAY_ICONS[s.payment_method] || "fa-receipt"}"></i></div>
             <div class="list-main">
                 <strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}
-                <div class="muted">${receiptShort(s.receipt_no)} · ${count(s.item_count, "item")} · ${esc(PAY_LABELS[s.payment_method] || "Cash")}${isAdmin() ? " · " + esc(s.username) : ""}</div>
+                <div class="muted">${s.pending ? "On this device" : receiptShort(s.receipt_no)} · ${count(s.item_count, "item")} · ${esc(PAY_LABELS[s.payment_method] || "Cash")}${isAdmin() ? " · " + esc(s.username) : ""}</div>
             </div>
             <div class="list-end"><strong>${money(s.total)}</strong><span class="muted small">${fmtTime(s.created_at)}</span></div>
         </div>`;
 }
 // Cancelled / returned sales stay on record but don't count in any total
 const isLive = s => s.status !== "voided";
-const voidChip = s => isLive(s) ? "" : `<span class="pill out small-pill">${s.void_type === "return" ? "Returned" : "Cancelled"}</span>`;
+const voidChip = s => s.pending ? `<span class="pill low small-pill">${s.failed ? "Not saved — see note" : "Waiting to send"}</span>`
+    : isLive(s) ? "" : `<span class="pill out small-pill">${s.void_type === "return" ? "Returned" : "Cancelled"}</span>`;
+// Sales made offline on this device (not yet on the server), shaped like server sales so lists and totals include them
+function pendingSalesFor(date) {
+    return getPending().filter(o => (o.kind || "sale") === "sale" && String(o.recorded_at).slice(0, 10) === date)
+        .map(o => ({ pending: true, failed: o.status === "failed", customer: o.customer, total: o.total,
+                     item_count: o.lines.reduce((t, l) => t + l.qty, 0), payment_method: o.payment_method,
+                     username: state.user?.username, created_at: o.recorded_at, receipt_no: "" }))
+        .reverse();
+}
 
 /* ------------------------------------------------------------------
    STOCK
@@ -831,6 +940,7 @@ async function completeSale() {
         clearSale();
         toast(`Sale saved — ${naira(sale.total)}`, "success");
         if (body.new_customer) fetchCustomers();
+        syncLocal();
         await fetchParts();
         loadSalesHistory();
         showReceipt(sale);
@@ -856,15 +966,17 @@ async function loadSalesHistory() {
     if (!dateEl.value) dateEl.value = todayLocal();
     const tbody = $("salesHistoryBody");
     try {
-        const { sales } = await apiFetch(`/sales?date=${dateEl.value}`);
+        const { sales: fromServer } = await apiFetch(`/sales?date=${dateEl.value}`);
+        const sales = [...pendingSalesFor(dateEl.value), ...fromServer];
         const kept = sales.filter(isLive);
         const total = kept.reduce((s, x) => s + x.total, 0);
         const voided = sales.length - kept.length;
+        const waiting = sales.filter(x => x.pending).length;
         $("historySummary").innerHTML = `${dayName(dateEl.value)} · ${count(kept.length, "sale")} · ${money(total)}` +
-            (voided ? ` · ${voided} cancelled` : "");
+            (voided ? ` · ${voided} cancelled` : "") + (waiting ? ` · ${waiting} waiting to send` : "");
         tbody.innerHTML = sales.length ? sales.map(s => `
-            <tr class="clickable ${isLive(s) ? "" : "voided"}" onclick="viewReceipt(${s.id})">
-                <td class="card-title"><strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}<div class="muted small">${receiptShort(s.receipt_no)}${s.sent_offline ? " · recorded offline" : ""}</div></td>
+            <tr class="${s.pending ? "pending-row" : "clickable"} ${isLive(s) ? "" : "voided"}" ${s.pending ? "" : `onclick="viewReceipt(${s.id})"`}>
+                <td class="card-title"><strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}<div class="muted small">${s.pending ? "Recorded on this device" : receiptShort(s.receipt_no)}${s.sent_offline ? " · recorded offline" : ""}</div></td>
                 <td data-label="Time">${fmtTime(s.created_at)}</td>
                 <td data-label="Paid by">${esc(PAY_LABELS[s.payment_method] || "Cash")}</td>
                 <td data-label="Served by">${esc(s.username)}</td>
@@ -872,6 +984,20 @@ async function loadSalesHistory() {
             </tr>`).join("")
             : `<tr><td class="empty-cell" colspan="5">No sales ${dayDiff(dateEl.value) === 0 ? "yet today" : "on this day"}.</td></tr>`;
     } catch (err) {
+        const local = err.offline && window.LocalDB?.salesOn(dateEl.value, isAdmin() ? null : state.user.username);
+        if (local) {
+            const sales = [...pendingSalesFor(dateEl.value), ...local], kept = sales.filter(isLive);
+            $("historySummary").innerHTML = `${dayName(dateEl.value)} · ${count(kept.length, "sale")} · ${money(kept.reduce((t, x) => t + x.total, 0))} · from this device`;
+            tbody.innerHTML = sales.length ? sales.map(s => `
+                <tr class="${s.pending ? "pending-row" : "clickable"} ${isLive(s) ? "" : "voided"}" ${s.pending ? "" : `onclick="viewReceipt(${s.id})"`}>
+                    <td class="card-title"><strong>${esc(s.customer || "Walk-in customer")}</strong> ${voidChip(s)}<div class="muted small">${s.pending ? "Recorded on this device" : receiptShort(s.receipt_no)}</div></td>
+                    <td data-label="Time">${fmtTime(s.created_at)}</td>
+                    <td data-label="Paid by">${esc(PAY_LABELS[s.payment_method] || "Cash")}</td>
+                    <td data-label="Served by">${esc(s.username || "")}</td>
+                    <td class="num" data-label="Total"><strong>${money(s.total)}</strong></td>
+                </tr>`).join("") : `<tr><td class="empty-cell" colspan="5">No sales saved on this device for this day.</td></tr>`;
+            return;
+        }
         tbody.innerHTML = `<tr><td class="empty-cell ${err.offline ? "" : "c-out"}" colspan="5">${esc(err.offline
             ? "No internet — the sales list will show when you're back online. You can still sell." : err.message)}</td></tr>`;
     }
@@ -951,7 +1077,7 @@ async function syncPending() {
     const list = getPending();
     if (!list.some(s => s.status === "pending")) return;
     syncing = true;
-    const sent = { sale: 0, restock: 0, count: 0 };
+    const sent = { sale: 0, restock: 0, count: 0, customer: 0 };
     try {
         for (const op of list) {                         // oldest first, so things arrive in the order they happened
             if (op.status !== "pending") continue;
@@ -964,6 +1090,9 @@ async function syncPending() {
                 else if (k === "restock")
                     await apiFetch(`/parts/${op.part_id}/restock`, { method: "POST", body: JSON.stringify({
                         qty: op.qty, client_ref: op.client_ref, recorded_at: op.recorded_at }) });
+                else if (k === "customer")
+                    await apiFetch("/customers", { method: "POST", body: JSON.stringify({
+                        name: op.name, phone: op.phone, email: op.email, note: op.note, consent: op.consent, client_ref: op.client_ref }) });
                 else if (k === "count") {
                     const c = await apiFetch(`/counts/${op.count_id}/lines`, { method: "PUT",
                         body: JSON.stringify({ part_id: op.part_id, counted: op.counted }) });
@@ -980,13 +1109,16 @@ async function syncPending() {
         syncing = false;
     }
     const parts = [sent.sale && count(sent.sale, "sale"), sent.restock && count(sent.restock, "restock"),
-                   sent.count && count(sent.count, "counted part")].filter(Boolean);
+                   sent.count && count(sent.count, "counted part"), sent.customer && count(sent.customer, "new customer")].filter(Boolean);
     if (parts.length) {
         toast(`Back online — ${parts.join(", ")} sent`, "success");
         await fetchParts();
         if ($("sales").classList.contains("active")) loadSalesHistory();
         if ($("dashboard").classList.contains("active")) loadTodaySummary();
         if ($("counts").classList.contains("active")) loadCounts();
+        if (sent.customer || sent.sale) await fetchCustomers();
+        syncLocal();
+        if ($("customers").classList.contains("active")) renderCustomers();
     }
 }
 
@@ -1001,15 +1133,17 @@ function renderPending() {
     const waiting = list.filter(s => s.status === "pending");
     const failed  = list.filter(s => s.status === "failed");
     const sales = waiting.filter(o => kindOf(o) === "sale"), restocks = waiting.filter(o => kindOf(o) === "restock"),
-          counts = waiting.filter(o => kindOf(o) === "count");
+          counts = waiting.filter(o => kindOf(o) === "count"), custs = waiting.filter(o => kindOf(o) === "customer");
     const what = [
         sales.length && `${count(sales.length, "sale")} (${money(sales.reduce((t, s) => t + s.total, 0))})`,
         restocks.length && count(restocks.length, "restock"),
-        counts.length && count(counts.length, "counted part")
+        counts.length && count(counts.length, "counted part"),
+        custs.length && count(custs.length, "new customer")
     ].filter(Boolean).join(", ");
     const describe = o => kindOf(o) === "sale"
         ? `sale of ${naira(o.total)}: ${o.lines.map(l => `${l.name} × ${l.qty}`).join(", ")}`
-        : kindOf(o) === "restock" ? `${o.qty} × ${o.name} added to stock` : `count of ${o.name} (${o.counted})`;
+        : kindOf(o) === "restock" ? `${o.qty} × ${o.name} added to stock`
+        : kindOf(o) === "customer" ? `new customer ${o.name}` : `count of ${o.name} (${o.counted})`;
     const html = !list.length ? "" : `
         ${waiting.length ? `<div class="notice warn pending-note"><i class="fa-solid fa-cloud-arrow-up"></i>
             <div><strong>${what} waiting to be sent.</strong>
@@ -1029,7 +1163,10 @@ setInterval(() => { if (navigator.onLine !== false) syncPending(); }, 30000);
 ------------------------------------------------------------------ */
 async function viewReceipt(id) {
     try { showReceipt(await apiFetch(`/sales/${id}`)); }
-    catch (err) { toast(err.message, "error"); }
+    catch (err) {
+        const local = err.offline && window.LocalDB?.sale(id);       // from this device's database
+        if (local) showReceipt(local); else toast(err.message, "error");
+    }
 }
 
 function showReceipt(sale) {
@@ -1129,10 +1266,21 @@ async function fetchCustomers() {
     try {
         state.customers = await apiFetch("/customers");
         store(custCacheKey(), JSON.stringify(state.customers));
+        window.LocalDB?.saveCustomers(state.customers);
     } catch (err) {
         if (!state.customers.length) try { state.customers = JSON.parse(load(custCacheKey()) || "[]"); } catch (_) {}
     }
+    // Customers added offline and not yet sent show too (marked by a temporary negative id)
+    const waiting = getPending().filter(o => o.kind === "customer" && o.status === "pending")
+        .map(o => ({ id: o.temp_id, name: o.name, phone: o.phone || null, email: o.email || null, note: o.note || null,
+                     consent: o.consent ? 1 : 0, visits: 0, spent: 0, last_visit: null, pending: true }));
+    state.customers = [...waiting, ...state.customers.filter(c => c.id > 0)];
     return state.customers;
+}
+function queueOfflineCustomer(body) {
+    const temp_id = -Date.now();
+    setPending([...getPending(), { kind: "customer", client_ref: newRef(), temp_id, ...body, recorded_at: localStamp(), status: "pending" }]);
+    state.customers.unshift({ id: temp_id, ...body, visits: 0, spent: 0, last_visit: null, pending: true });
 }
 
 function matchCustomers(q) {
@@ -1184,7 +1332,32 @@ function clearSaleCustomer() {
     $("saleCustomer").value = ""; $("newCustPhone").value = ""; $("newCustEmail").value = ""; $("newCustConsent").checked = true;
     renderSaleCustomer();
 }
+// The picked customer's usual purchases, from this device's database (works offline); tap to add to the sale
+async function renderUsualBuys() {
+    const box = $("custFavs");
+    const c = state.saleCustomer;
+    if (!box) return;
+    if (!c || !(c.id > 0)) { box.hidden = true; box.innerHTML = ""; return; }
+    let favs = window.LocalDB?.ready ? LocalDB.favourites(c.id, favAfter()) : [];
+    if (!favs.length) try { favs = (await apiFetch(`/customers/${c.id}`)).favourites || []; } catch (_) {}
+    if (state.saleCustomer !== c) return;                 // customer changed while loading
+    const usable = favs.map(f => ({ f, p: state.parts.find(x => x.id === f.part_id) })).filter(x => x.p);
+    box.hidden = !usable.length;
+    box.innerHTML = usable.length ? `<span class="fav-title"><i class="fa-solid fa-star"></i> Usually buys:</span>` + usable.map(({ f, p }) =>
+        `<button type="button" class="fav-chip btn-chip" ${leftFor(p) > 0 ? "" : "disabled title='Out of stock'"} onclick="addUsual(${p.id})">
+            <i class="fa-solid fa-plus"></i> ${esc(p.name)} <em>${f.times}×</em></button>`).join("") : "";
+}
+function addUsual(partId) {
+    const p = state.parts.find(x => x.id === partId);
+    if (!p) return;
+    if (leftFor(p) <= 0) return toast(`${p.name} is out of stock`, "error");
+    addLine(p.id, 1);
+    populateSaleDropdown();
+    toast(`Added ${p.name}`, "success");
+}
+
 function renderSaleCustomer() {
+    renderUsualBuys();
     const c = state.saleCustomer;
     $("custResults").hidden = true;
     $("custSearchWrap").hidden = !!c;
@@ -1201,6 +1374,9 @@ function renderSaleCustomer() {
 function saleCustomerFields() {
     const c = state.saleCustomer;
     if (!c) return { customer: $("saleCustomer").value.trim() };     // just a name typed, or walk-in
+    if (c.id < 0 && !c.phone && !c.email) return { customer: c.name };   // offline-added, name only: nothing to match on
+    if (c.id < 0)          // added offline, not on the server yet: send the details so the server creates (or matches) them by phone
+        return { customer: c.name, new_customer: { name: c.name, phone: c.phone || "", email: c.email || "", consent: true } };
     if (!c.isNew) return { customer: c.name, customer_id: c.id };
     const phone = normalizePhone($("newCustPhone").value);
     const email = $("newCustEmail").value.trim().toLowerCase();
@@ -1280,7 +1456,18 @@ function renderCustomers() {
 
 async function openCustomer(id) {
     try {
-        const c = await apiFetch(`/customers/${id}`);
+        let c;
+        if (id < 0) {                       // added offline, not sent yet
+            const p = state.customers.find(x => x.id === id);
+            c = { ...p, sales: [], visits: 0, spent: 0, favourites: [] };
+        } else {
+            try { c = await apiFetch(`/customers/${id}`); }
+            catch (err) {
+                const local = err.offline && window.LocalDB?.customerProfile(id);     // from this device's database
+                if (!local) throw err;
+                c = { ...local, favourites: LocalDB.favourites(id, favAfter()) };
+            }
+        }
         state.openCustomer = c;
         const done = c.sales.filter(isLive);
         $("customerModalBody").innerHTML = `
@@ -1288,6 +1475,10 @@ async function openCustomer(id) {
             <p class="modal-sub">${[c.phone && `<i class="fa-brands fa-whatsapp"></i> ${esc(showPhone(c.phone))}`, c.email && `<i class="fa-solid fa-envelope"></i> ${esc(c.email)}`]
                 .filter(Boolean).join(" &nbsp;·&nbsp; ") || "No phone or email saved"}${c.consent ? "" : (c.phone || c.email ? ` <span class="pill low small-pill">no consent to messages</span>` : "")}</p>
             ${c.note ? `<p class="small" style="margin-bottom:10px;">${esc(c.note)}</p>` : ""}
+            ${c.from_device ? `<p class="small muted" style="margin-bottom:10px;"><i class="fa-solid fa-database"></i> No internet — shown from this device's saved records.</p>` : ""}
+            ${c.pending ? `<p class="small muted" style="margin-bottom:10px;"><i class="fa-solid fa-cloud-arrow-up"></i> Added on this device; it will be sent when the internet is back.</p>` : ""}
+            ${(c.favourites || []).length ? `<div class="fav-box"><div class="fav-title"><i class="fa-solid fa-star"></i> Usually buys</div>
+                <div class="fav-chips">${c.favourites.map(f => `<span class="fav-chip">${esc(f.part_name)} <em>${f.times}×</em></span>`).join("")}</div></div>` : ""}
             <div class="mini-stats" style="margin-bottom:14px;">
                 <span><strong>${c.visits}</strong> ${c.visits === 1 ? "visit" : "visits"}</span>
                 <span><strong>${money(c.spent)}</strong> spent</span>
@@ -1364,7 +1555,16 @@ async function saveCustomerEdit() {
         await fetchCustomers();
         if ($("customers").classList.contains("active")) renderCustomers();
         if (editingCustomerId) openCustomer(c.id);
-    } catch (err) { toast(err.offline ? "No internet — add the customer when you're online, or add them during a sale" : err.message, "error"); }
+    } catch (err) {
+        if (!err.offline) return toast(err.message, "error");
+        if (editingCustomerId) return toast("No internet — changes to a saved customer need a connection", "error");
+        // New customer with no internet: keep on this device, send when back online
+        if (phone && state.customers.some(c => c.phone === phone)) return toast("A customer with this phone number is already saved", "error");
+        queueOfflineCustomer(body);
+        closeModal("customerEditModal");
+        toast("No internet — customer saved on this device and will be sent automatically", "info");
+        if ($("customers").classList.contains("active")) renderCustomers();
+    }
 }
 async function deleteCustomer(id) {
     if (!confirm("Forget this customer's phone and email? Their past sales stay on record with their name.")) return;
@@ -2116,13 +2316,15 @@ function fillShopForm() {
     $("shopAddressInput").value = state.shop.address || "";
     $("shopPhoneInput").value = state.shop.phone || "";
     $("shopNoteInput").value = state.shop.receipt_note || "";
+    $("shopFavInput").value = state.shop.favourite_after || 3;
 }
 async function saveShopDetails() {
     const body = {
         name: $("shopNameInput").value.trim(),
         address: $("shopAddressInput").value.trim(),
         phone: $("shopPhoneInput").value.trim(),
-        receipt_note: $("shopNoteInput").value.trim()
+        receipt_note: $("shopNoteInput").value.trim(),
+        favourite_after: $("shopFavInput").value.trim() || "3"
     };
     if (!body.name) return toast("Enter your business name", "error");
     try {

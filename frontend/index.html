@@ -29,6 +29,8 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div class="load-bar" aria-hidden="true"></div>
+<div class="slow-note" id="slowNote" role="status" hidden></div>
 
 <!-- ============================== SIGN IN ============================== -->
 <div id="loginScreen" class="login-container">
@@ -116,6 +118,7 @@
         </aside>
 
         <main class="main">
+            <div class="saved-strip" id="savedStrip" role="status" hidden></div>
 
             <!-- DASHBOARD -->
             <section id="dashboard" class="section">
@@ -217,6 +220,7 @@
                             <div class="form-row">
                                 <label class="field-label" for="saleCustomer">Customer <span class="muted">(optional — to send the receipt by WhatsApp or email)</span></label>
                                 <div id="custPicked" class="cust-picked" hidden></div>
+                                <div id="custFavs" class="fav-row" hidden></div>
                                 <div id="custSearchWrap" class="cust-search">
                                     <div class="input-icon"><i class="fa-solid fa-user"></i>
                                         <input class="input" id="saleCustomer" maxlength="80" placeholder="Search name or phone, or type a new name" autocomplete="off"
@@ -360,6 +364,9 @@
                         </div>
                         <div class="form-row"><label class="field-label" for="shopAddressInput">Address</label><input id="shopAddressInput" maxlength="120" placeholder="e.g. 12 Ladipo Street, Mushin, Lagos"></div>
                         <div class="form-row"><label class="field-label" for="shopNoteInput">Message at the bottom of receipts</label><input id="shopNoteInput" maxlength="120" placeholder="Thank you for your patronage"></div>
+                        <div class="form-row"><label class="field-label" for="shopFavInput">"Usually buys" after how many purchases?</label>
+                            <input id="shopFavInput" type="number" min="2" max="20" inputmode="numeric" style="max-width:120px">
+                            <p class="form-hint">A part a customer has bought on this many separate visits shows as one of their usual purchases, for one-tap selling.</p></div>
                         <button class="btn btn-primary" onclick="saveShopDetails()"><i class="fa-solid fa-floppy-disk"></i> Save shop details</button>
                     </div>
 
@@ -599,6 +606,7 @@
 <div id="labelSheet" aria-hidden="true"></div>
 <div id="toast-container" aria-live="polite"></div>
 
+<script src="localdb.js"></script>
 <script src="app.js"></script>
 <script>
     // The website keeps its files on the phone with a service worker; the installed apps already have them
